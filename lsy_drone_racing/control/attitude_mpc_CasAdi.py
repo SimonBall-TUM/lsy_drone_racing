@@ -1,5 +1,7 @@
 """This module implements an example MPC using attitude control for a quadrotor.
 
+smoothed control commands with obstacle avoidance
+
 It utilizes the collective thrust interface for drone control to compute control commands based on
 current state observations and desired waypoints.
 
@@ -41,9 +43,7 @@ class MPController(Controller):
         self.freq = config.env.freq
         self._tick = 0
         self.start_pos = obs["pos"]
-
-        # IMPORTANT: Store the config BEFORE using it in _generate_waypoints
-        self.config = config  # Move this line here
+        self.config = config 
 
         # Define Gravitational Acceleration
         self.GRAVITY = 9.806
@@ -55,29 +55,35 @@ class MPController(Controller):
         self.params_acc = [20.907574256269616, 3.653687545690674]  # acceleration dynamics
 
         # Generate waypoints that account for gate orientation
-        # waypoints = self._generate_waypoints(obs)
+        waypoints = self._generate_waypoints(obs)
+        # waypoints = np.array([
+        #     [0.5, 0.5, 1.5],
+        #     [1.5, 0.5, 1.5],
+        #     [1.5, 1.5, 1.5],
+        #     [0.5, 1.5, 1.5]
+        # ])
         # Same waypoints as in the trajectory controller. Determined by trial and error.
-        waypoints = np.array([
-            self.start_pos,
-            obs["obstacles_pos"][0] + [0.2, 0.5, -0.7],
-            obs["obstacles_pos"][0] + [0.2, -0.3, -0.7],
-            obs["gates_pos"][0] + 0.5 * (obs["obstacles_pos"][0] - [0, 0, 0.6] - obs["gates_pos"][0]),
-            obs["gates_pos"][0] + [-0.1, 0.1, 0],
-            obs["gates_pos"][0] + [-0.6, -0.2, 0],
-            obs["obstacles_pos"][1] + [-0.3, -0.3, -0.7],
-            obs["gates_pos"][1] + [-0.1, -0.2, 0],
-            obs["gates_pos"][1],
-            obs["gates_pos"][1] + [0.2, 0.5, 0],
-            obs["obstacles_pos"][0] + [-0.3, 0, -0.7],
-            obs["gates_pos"][2] + [0.2, -0.5, 0],
-            obs["gates_pos"][2] + [0.1, 0, 0],
-            obs["gates_pos"][2] + [0.1, 0.15, 0],
-            obs["gates_pos"][2] + [0.1, 0.15, 1],
-            obs["obstacles_pos"][3] + [0.4, 0.3, -0.2],
-            obs["obstacles_pos"][3] + [0.4, 0, -0.2],
-            obs["gates_pos"][3],
-            obs["gates_pos"][3] + [0, -0.5, 0],
-        ])
+        # waypoints = np.array([
+        #     self.start_pos,
+        #     obs["obstacles_pos"][0] + [0.2, 0.5, -0.7],
+        #     obs["obstacles_pos"][0] + [0.2, -0.3, -0.7],
+        #     obs["gates_pos"][0] + 0.5 * (obs["obstacles_pos"][0] - [0, 0, 0.6] - obs["gates_pos"][0]),
+        #     obs["gates_pos"][0] + [-0.1, 0.1, 0],
+        #     obs["gates_pos"][0] + [-0.6, -0.2, 0],
+        #     obs["obstacles_pos"][1] + [-0.3, -0.3, -0.7],
+        #     obs["gates_pos"][1] + [-0.1, -0.2, 0],
+        #     obs["gates_pos"][1],
+        #     obs["gates_pos"][1] + [0.2, 0.5, 0],
+        #     obs["obstacles_pos"][0] + [-0.3, 0, -0.7],
+        #     obs["gates_pos"][2] + [0.2, -0.5, 0],
+        #     obs["gates_pos"][2] + [0.1, 0, 0],
+        #     obs["gates_pos"][2] + [0.1, 0.15, 0],
+        #     obs["gates_pos"][2] + [0.1, 0.15, 1],
+        #     obs["obstacles_pos"][3] + [0.4, 0.3, -0.2],
+        #     obs["obstacles_pos"][3] + [0.4, 0, -0.2],
+        #     obs["gates_pos"][3],
+        #     obs["gates_pos"][3] + [0, -0.5, 0],
+        # ])
         # waypoints = np.array(
         #     [
         #         [1.0, 1.5, 0.05],
@@ -98,15 +104,15 @@ class MPController(Controller):
         cs_y = CubicSpline(ts, waypoints[:, 1])
         cs_z = CubicSpline(ts, waypoints[:, 2])
 
-        des_completion_time = 8
+        des_completion_time = 12  # Increase from 8 to 12 seconds
         ts = np.linspace(0, 1, int(self.freq * des_completion_time))
 
         self.x_des = cs_x(ts)
         self.y_des = cs_y(ts)
         self.z_des = cs_z(ts)
 
-        self.N = 5  # Horizon length
-        self.T_HORIZON = 0.1 # Time horizon
+        self.N = 30  # Horizon length
+        self.T_HORIZON = 1.2 # Time horizon
         self.dt = self.T_HORIZON / self.N  # Time step
 
         # Extend trajectory for prediction horizon
@@ -140,8 +146,9 @@ class MPController(Controller):
         self.mpc_solve_times = []
         self.gate_times = [None] * len(obs["gates_pos"])
         self.gate_passed = [False] * len(obs["gates_pos"])
+        # self.closest_obstacle_distances = [1 * np.ones(len(obs["obstacles_pos"])) for _ in range(len(obs["gates_pos"]))] ## changed
         self.closest_obstacle_distances = []
-        
+
         # Log creation
         log_dir = "flight_logs"
         os.makedirs(log_dir, exist_ok=True)
@@ -206,6 +213,7 @@ class MPController(Controller):
         f_collective = self.x_sym[9]
         f_collective_cmd = self.x_sym[10]
         r_cmd, p_cmd, y_cmd = self.x_sym[11], self.x_sym[12], self.x_sym[13]
+        
 
         # Unpack control inputs
         df_cmd, dr_cmd, dp_cmd, dy_cmd = self.u_sym[0], self.u_sym[1], self.u_sym[2], self.u_sym[3]
@@ -265,21 +273,22 @@ class MPController(Controller):
         # Q = np.diag([
         #     10.0, 10.0, 10.0,   # Position
         #     0.01, 0.01, 0.01,   # Velocity
-        #     0.1, 0.1, 0.1,      # rpy
+        #     0.1, 0.1, 0.1,      # rpy - roll, pitch, yaw
         #     0.01, 0.01,         # f_collective, f_collective_cmd
         #     0.01, 0.01, 0.01,   # rpy_cmd
         # ])
+        # R = np.diag([0.01, 0.01, 0.01, 0.01])  # Input cost
 
         # Define weight matrices for the cost function
         Q = np.diag([
-            10.0, 10.0, 10.0,   # Position
-            0.01, 0.01, 0.01,   # Velocity
-            0.1, 0.1, 0.1,      # rpy
-            0.01, 0.01,         # f_collective, f_collective_cmd
-            0.01, 0.01, 0.01,   # rpy_cmd
+            5.0, 5.0, 5.0,       # Position weights
+            0.3, 0.3, 0.3,       # Velocity weights
+            0.8, 0.8, 0.8,       # rpy weights
+            0.02, 0.02,          # f_collective, f_collective_cmd
+            0.05, 0.05, 0.05,    # rpy_cmd
         ])
+        R = np.diag([0.05, 0.05, 0.05, 0.05]) # Input cost
         
-        R = np.diag([0.01, 0.01, 0.01, 0.01])  # Input cost
         Q_e = Q.copy()  # Terminal cost
 
         # Define the objective function
@@ -318,6 +327,34 @@ class MPController(Controller):
             g.append(self.X[9:14, k])  # Constraints on f_collective, f_cmd, rpy_cmd
             lbg.extend([0.1, 0.1, -1.57, -1.57, -1.57])  # Lower bounds
             ubg.extend([0.55, 0.55, 1.57, 1.57, 1.57])   # Upper bounds
+
+        # Limit rate of change of control inputs
+        if self.N > 1:
+            for k in range(1, self.N):
+                # Constrain change in control inputs
+                delta_u = self.U[:, k] - self.U[:, k-1]
+                g.append(delta_u)
+                max_rate = 0.1  # Maximum allowed rate of change
+                lbg.extend([-max_rate, -max_rate, -max_rate, -max_rate])
+                ubg.extend([max_rate, max_rate, max_rate, max_rate])
+
+        # Add soft constraints for obstacle avoidance
+        safety_radius = 0.3  # 30cm minimum distance
+        obstacle_weight = 100.0  # Weight for obstacle avoidance in cost function
+            
+        # For each obstacle, add soft constraint to cost function
+        for obs_pos in self.config.env.track["obstacles"]:
+            obs_pos_array = np.array(obs_pos["pos"])
+            
+            for k in range(1, self.N+1):
+                # For each prediction step, compute distance to obstacle
+                pos_k = self.X[:3, k]
+                dist_to_obs = ca.norm_2(pos_k - obs_pos_array)
+                
+                # Add soft constraint to cost function
+                # This increases cost when drone gets too close to obstacles
+                penalty = ca.fmax(0, safety_radius - dist_to_obs)
+                objective += obstacle_weight * penalty * penalty
 
         # Define parameters for the solver
         self.opt_vars = ca.vertcat(ca.reshape(self.X, -1, 1), ca.reshape(self.U, -1, 1))
@@ -457,10 +494,10 @@ class MPController(Controller):
         x1 = x_opt[1]
 
         # Smooth the control
-        w = 1 / self.config.env.freq / self.dt
+        w = 0.7 / self.config.env.freq / self.dt  # Reduce weight factor for smoother transition
         self.last_f_collective = self.last_f_collective * (1 - w) + x1[9] * w
-        self.last_f_cmd = x1[10]
-        self.last_rpy_cmd = x1[11:14]
+        self.last_f_cmd = self.last_f_cmd * (1 - w) + x1[10] * w
+        self.last_rpy_cmd = self.last_rpy_cmd * (1 - w) + x1[11:14] * w
 
         # Extract the commanded values [f_collective_cmd, r_cmd, p_cmd, y_cmd]
         cmd = x1[10:14]
@@ -479,8 +516,23 @@ class MPController(Controller):
         # Position 9 for yaw angle
         full_cmd[9] = cmd[3]   # Yaw command
         
-        # Reshape to match expected (n_worlds, n_drones, 13)
-        # Assuming n_worlds=1 and n_drones=1 for simplicity
+        # Extract only the attitude control components (thrust, roll, pitch, yaw)
+        attitude_cmd = np.zeros(4)
+        attitude_cmd[0] = cmd[0]  # Thrust command
+        attitude_cmd[1] = cmd[1]  # Roll rate command
+        attitude_cmd[2] = cmd[2]  # Pitch rate command
+        attitude_cmd[3] = cmd[3]  # Yaw rate command
+        
+        # print("---------------------------")
+        # print(f"Original roll/pitch: {attitude_cmd[1]:.3f}, {attitude_cmd[2]:.3f}")
+        
+        # # Modify commands
+        # attitude_cmd[1] += 0.2  # Add roll bias
+        # attitude_cmd[2] += 0.1  # Add pitch bias 
+        
+        # print(f"Modified roll/pitch: {attitude_cmd[1]:.3f}, {attitude_cmd[2]:.3f}")
+        
+        # For visualization & logging, keep using full_cmd
         solve_time = time.time() - start_solve_time
         self.mpc_solve_times.append(solve_time)
         
@@ -488,38 +540,11 @@ class MPController(Controller):
         if self.enable_visualization and not self.visualization_initialized:
             self._initialize_visualization()
         
-        # Update flight data
+        # Update flight data using the full command for consistent visualization
         self._update_flight_data(obs, full_cmd, time.time())
         
-        # For visualization purposes, highlight the trajectory near gates
-        if self.enable_visualization and self.visualization_initialized:
-            # Add gate crossing indicators to the 3D plot
-            for i, gate_pos in enumerate(obs["gates_pos"]):
-                # Find the closest point on the trajectory to this gate
-                distances = np.sqrt(
-                    (self.x_des - gate_pos[0])**2 + 
-                    (self.y_des - gate_pos[1])**2 + 
-                    (self.z_des - gate_pos[2])**2
-                )
-                closest_idx = np.argmin(distances)
-                
-                # Highlight this region on the plots if not already done
-                if i < len(self.gate_passed) and not self.gate_passed[i]:
-                    # Highlight trajectory segment near the gate in the 3D view
-                    segment_len = 10  # Points before/after gate crossing
-                    start_idx = max(0, closest_idx - segment_len)
-                    end_idx = min(len(self.x_des), closest_idx + segment_len)
-                    
-                    # Add highlighted segment to 3D plot
-                    self.axes['3d'].plot(
-                        self.x_des[start_idx:end_idx],
-                        self.y_des[start_idx:end_idx],
-                        self.z_des[start_idx:end_idx],
-                        'y-', linewidth=4, alpha=0.7
-                    )
-    
-        return full_cmd.reshape(1, 1, 13)
-
+        # Return the 4D attitude command with the correct shape
+        return attitude_cmd.reshape(1, 1, 4)
 
     def step_callback(
         self, action, obs, reward, terminated, truncated, info

@@ -17,6 +17,8 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from casadi import MX, cos, sin, vertcat
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation as R
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 from lsy_drone_racing.control import Controller
 
@@ -236,22 +238,101 @@ class MPController(Controller):
         super().__init__(obs, info, config)
         self.freq = config.env.freq
         self._tick = 0
+        self.start_pos = obs["pos"]
+        self.config = config 
 
+
+        waypoints = self._generate_waypoints(obs)
+        
+        # Create temporary 3D plot of waypoints
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Plot waypoints
+        ax.plot(waypoints[:, 0], waypoints[:, 1], waypoints[:, 2], 'b-o', linewidth=2, markersize=8, label='Waypoints')
+        
+        # Plot gates
+        for i, gate in enumerate(self.config.env.track["gates"]):
+            pos = np.array(gate["pos"])
+            
+            # Get gate orientation
+            if "rpy" in gate:
+                rpy = np.array(gate["rpy"])
+                rotation = R.from_euler('xyz', rpy)
+            else:
+                rotation = R.from_euler('xyz', [0, 0, 0])
+            
+            # Plot gate position
+            ax.scatter(pos[0], pos[1], pos[2], color='red', s=100, marker='^', label=f'Gate {i+1}' if i==0 else "")
+            
+            # Visualize gate orientation with vectors
+            normal = rotation.apply([1.0, 0.0, 0.0])
+            ax.quiver(pos[0], pos[1], pos[2], normal[0], normal[1], normal[2], 
+                      color='g', length=0.5, arrow_length_ratio=0.2, label='Gate Normal' if i==0 else "")
+        
+        # Plot obstacles if available
+        if "obstacles" in self.config.env.track:
+            obstacles = np.array([np.array(obs["pos"]) for obs in self.config.env.track["obstacles"]])
+            ax.scatter(obstacles[:, 0], obstacles[:, 1], obstacles[:, 2], color='red', s=100, marker='s', label='Obstacles')
+        
+        # Add labels and legend
+        ax.set_xlabel('X [m]')
+        ax.set_ylabel('Y [m]')
+        ax.set_zlabel('Z [m]')
+        ax.set_title('Drone Racing Waypoints')
+        ax.legend()
+        
+        # Make axis equal scale
+        max_range = np.array([
+            waypoints[:, 0].max() - waypoints[:, 0].min(),
+            waypoints[:, 1].max() - waypoints[:, 1].min(),
+            waypoints[:, 2].max() - waypoints[:, 2].min()
+        ]).max() / 2.0
+        
+        mid_x = (waypoints[:, 0].max() + waypoints[:, 0].min()) / 2
+        mid_y = (waypoints[:, 1].max() + waypoints[:, 1].min()) / 2
+        mid_z = (waypoints[:, 2].max() + waypoints[:, 2].min()) / 2
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+        
+        plt.show(block=False)
+
+        # waypoints = np.array([
+        #     obs["obstacles_pos"][0] + [0.2, 0.5, -0.7],
+        #     obs["obstacles_pos"][0] + [0.2, -0.3, -0.7],
+        #     obs["gates_pos"][0] + 0.5 * (obs["obstacles_pos"][0] - [0, 0, 0.6] - obs["gates_pos"][0]),
+        #     obs["gates_pos"][0] + [-0.1, 0.1, 0],
+        #     obs["gates_pos"][0] + [-0.6, -0.2, 0],
+        #     obs["obstacles_pos"][1] + [-0.3, -0.3, -0.7],
+        #     obs["gates_pos"][1] + [-0.1, -0.2, 0],
+        #     obs["gates_pos"][1],
+        #     obs["gates_pos"][1] + [0.2, 0.5, 0],
+        #     obs["obstacles_pos"][0] + [-0.3, 0, -0.7],
+        #     obs["gates_pos"][2] + [0.2, -0.5, 0],
+        #     obs["gates_pos"][2] + [0.1, 0, 0],
+        #     obs["gates_pos"][2] + [0.1, 0.15, 0],
+        #     obs["gates_pos"][2] + [0.1, 0.15, 1],
+        #     obs["obstacles_pos"][3] + [0.4, 0.3, -0.2],
+        #     obs["obstacles_pos"][3] + [0.4, 0, -0.2],
+        #     obs["gates_pos"][3],
+        #     obs["gates_pos"][3] + [0, -0.5, 0],
+        # ])
         # Same waypoints as in the trajectory controller. Determined by trial and error.
-        waypoints = np.array(
-            [
-                [1.0, 1.5, 0.05],
-                [0.8, 1.0, 0.2],
-                [0.55, -0.3, 0.5],
-                [0.2, -1.3, 0.65],
-                [1.1, -0.85, 1.1],
-                [0.2, 0.5, 0.65],
-                [0.0, 1.2, 0.525],
-                [0.0, 1.2, 1.1],
-                [-0.5, 0.0, 1.1],
-                [-0.5, -0.5, 1.1],
-            ]
-        )
+        # waypoints = np.array(
+        #     [
+        #         [1.0, 1.5, 0.05],
+        #         [0.8, 1.0, 0.2],
+        #         [0.55, -0.3, 0.5],
+        #         [0.2, -1.3, 0.65],
+        #         [1.1, -0.85, 1.1],
+        #         [0.2, 0.5, 0.65],
+        #         [0.0, 1.2, 0.525],
+        #         [0.0, 1.2, 1.1],
+        #         [-0.5, 0.0, 1.1],
+        #         [-0.5, -0.5, 1.1],
+        #     ]
+        # )
         # Scale trajectory between 0 and 1
         ts = np.linspace(0, 1, np.shape(waypoints)[0])
         cs_x = CubicSpline(ts, waypoints[:, 0])
@@ -266,7 +347,7 @@ class MPController(Controller):
         self.z_des = cs_z(ts)
 
         self.N = 30
-        self.T_HORIZON = 1.5
+        self.T_HORIZON = 2.5
         self.dt = self.T_HORIZON / self.N
         self.x_des = np.concatenate((self.x_des, [self.x_des[-1]] * (2 * self.N + 1)))
         self.y_des = np.concatenate((self.y_des, [self.y_des[-1]] * (2 * self.N + 1)))
@@ -279,6 +360,45 @@ class MPController(Controller):
         self.last_f_cmd = 0.3
         self.config = config
         self.finished = False
+
+    def _generate_waypoints(self, obs):
+        """Generate waypoints that properly navigate through vertical gates"""
+        waypoints = []
+        
+        # Add starting position
+        waypoints.append(self.start_pos)
+        
+        # For each gate, create waypoints that approach and pass through the gate correctly
+        for i, gate in enumerate(self.config.env.track["gates"]):
+            pos = np.array(gate["pos"])
+            
+            # Get gate orientation
+            if "rpy" in gate:
+                rpy = np.array(gate["rpy"])
+                rotation = R.from_euler('xyz', rpy)
+            else:
+                rotation = R.from_euler('xyz', [0, 0, 0])
+            
+            # Get normal vector (perpendicular to gate plane)
+            normal = rotation.apply([1.0, 0.0, 0.0])
+            
+            # Create pre-gate and post-gate waypoints along the normal direction
+            approach_dist = 0.5  # Distance before gate
+            exit_dist = 0.5    # Distance after gate
+            
+            # Approach waypoint - ensure we approach from the correct direction
+            approach_point = pos - normal * approach_dist
+            
+            # Exit waypoint - continue in same direction after gate
+            exit_point = pos + normal * exit_dist
+            
+            # Add waypoints to approach and exit the gate correctly
+            waypoints.append(approach_point)
+            waypoints.append(pos)  # Gate center
+            waypoints.append(exit_point)
+        
+        # Convert list to numpy array
+        return np.array(waypoints)
 
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
