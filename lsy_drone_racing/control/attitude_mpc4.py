@@ -263,7 +263,7 @@ class MPController(Controller):
         # Approach parameters
         # self.approach_dist = [0.2, 0.3, 0.5, 0.2]
         self.approach_dist = [0.2, 0.2, 0.1, 0.2]
-        self.exit_dist = [0.7, 0.3, 0.1, 1]
+        self.exit_dist = [1.3, 0.3, 0.1, 1]
         self.default_approach_dist = 0.7
         self.default_exit_dist = 0.5
 
