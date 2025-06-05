@@ -487,6 +487,9 @@ class MPController(Controller):
         x_opt = solution[:14 * (self.N + 1)].reshape(self.N + 1, 14)
         u_opt = solution[14 * (self.N + 1):].reshape(self.N, 4)
 
+        # Store the optimal trajectory as a class attribute for visualization
+        self.X_opt = x_opt.T  # Transpose to get shape [state_dim, horizon_length]
+
         # Extract the first control to apply (MPC strategy)
         optimal_control = u_opt[0]
         
@@ -564,6 +567,14 @@ class MPController(Controller):
         self._tick = 0
         self.finished = False
 
+    def get_predicted_trajectory(self):
+        """Return the MPC's predicted trajectory over the horizon."""
+        # For CasADi implementation
+        if hasattr(self, 'X_opt'):
+            # Extract position states (first 3 states are x,y,z)
+            return self.X_opt[:3, :].T  # Return with shape [N, 3]
+        return None
+    
     def generate_flight_report(self):
         """Generate a report of flight statistics and finalize visualization."""
         if not self.trajectory_history:

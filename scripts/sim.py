@@ -10,14 +10,16 @@ Look for instructions in `README.md` and in the official documentation.
 from __future__ import annotations
 
 import logging
+import random
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import fire
 import gymnasium
+import numpy as np
 from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
 
-from lsy_drone_racing.utils import load_config, load_controller
+from lsy_drone_racing.utils import draw_line, load_config, load_controller
 
 if TYPE_CHECKING:
     from ml_collections import ConfigDict
@@ -30,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def simulate(
-    config: str = "level0.toml",
+    config: str = "level2.toml",
     controller: str | None = None,
     n_runs: int = 1,
     gui: bool | None = None,
@@ -67,9 +69,12 @@ def simulate(
         track=config.env.track,
         disturbances=config.env.get("disturbances"),
         randomizations=config.env.get("randomizations"),
-        seed=config.env.seed,
+        # seed=config.env.seed,
+        seed=random.randint(1, 999999),
     )
     env = JaxToNumpy(env)
+
+    trajectory_color = np.array([1.0, 0, 0, 1])
 
     ep_times = []
     for _ in range(n_runs):  # Run n_runs episodes with the controller
@@ -93,6 +98,19 @@ def simulate(
             # Synchronize the GUI.
             if config.sim.gui:
                 if ((i * fps) % config.env.freq) < fps:
+                    # if isinstance(obs["target_gate"], np.ndarray) and obs["target_gate"].ndim == 2 and obs["target_gate"].shape[1] == 3:
+                    gate_pos = np.array(config.env.track["gates"][obs["target_gate"]]["pos"])
+                    points = np.array([obs["pos"], gate_pos])
+                    draw_line(env, points, trajectory_color)
+
+                    if hasattr(controller, "get_predicted_trajectory"):
+                        pred_traj = controller.get_predicted_trajectory()
+                        if pred_traj is not None and len(pred_traj) > 0:
+                            # Green color for prediction visualization
+                            prediction_color = np.array([0.0, 1.0, 0.0, 0.8])
+                            # Draw predicted trajectory from current position
+                            pred_points = np.vstack(([obs["pos"]], pred_traj))
+                            draw_line(env, pred_points, prediction_color)
                     env.render()
             i += 1
 

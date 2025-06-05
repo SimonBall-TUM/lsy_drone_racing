@@ -17,8 +17,6 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from casadi import MX, cos, sin, vertcat
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation as R
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 
 from lsy_drone_racing.control import Controller
 
@@ -139,27 +137,48 @@ def create_ocp_solver(
     ocp.cost.cost_type = "LINEAR_LS"
     ocp.cost.cost_type_e = "LINEAR_LS"
 
-    # Weights
+    # Define weight matrices for the cost function (same as in the original code)
+    # Q = np.diag([
+    #     10.0, 10.0, 10.0,   # Position
+    #     0.01, 0.01, 0.01,   # Velocity
+    #     0.1, 0.1, 0.1,      # rpy - roll, pitch, yaw
+    #     0.01, 0.01,         # f_collective, f_collective_cmd
+    #     0.01, 0.01, 0.01,   # rpy_cmd
+    # ])
+    # rate of change
+    #            f_col, r_cmd, p_cmd, y_cmd
+    # R = np.diag([0.01, 0.01, 0.01, 0.01])  # Input cost
+
+    # Define weight matrices for the cost function
+    pos = 2.0
+    vel = 0.01
+    rpy = 0.1
+    f_col = 0.01
+    rpy_cmd = 0.01
+
     Q = np.diag(
         [
-            10.0,
-            10.0,
-            10.0,  # Position
-            0.01,
-            0.01,
-            0.01,  # Velocity
-            0.1,
-            0.1,
-            0.1,  # rpy
-            0.01,
-            0.01,  # f_collective, f_collective_cmd
-            0.01,
-            0.01,
-            0.01,
+            pos,
+            pos,
+            pos,  # Position
+            vel,
+            vel,
+            vel,  # Velocity
+            rpy,
+            rpy,
+            rpy,  # rpy - roll, pitch, yaw
+            f_col,
+            f_col,  # f_collective, f_collective_cmd
+            rpy_cmd,
+            rpy_cmd,
+            rpy_cmd,  # rpy_cmd
         ]
-    )  # rpy_cmd
+    )
 
-    R = np.diag([0.01, 0.01, 0.01, 0.01])
+    # rate of change
+    r_param = 0.25
+
+    R = np.diag([r_param, r_param, r_param, r_param])  # Input costt
 
     Q_e = Q.copy()
 
@@ -239,85 +258,10 @@ class MPController(Controller):
         self.freq = config.env.freq
         self._tick = 0
         self.start_pos = obs["pos"]
-        self.config = config 
-
+        self.config = config
 
         waypoints = self._generate_waypoints(obs)
-        
-        # Create temporary 3D plot of waypoints
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
-        
-        # Plot waypoints
-        ax.plot(waypoints[:, 0], waypoints[:, 1], waypoints[:, 2], 'b-o', linewidth=2, markersize=8, label='Waypoints')
-        
-        # Plot gates
-        for i, gate in enumerate(self.config.env.track["gates"]):
-            pos = np.array(gate["pos"])
-            
-            # Get gate orientation
-            if "rpy" in gate:
-                rpy = np.array(gate["rpy"])
-                rotation = R.from_euler('xyz', rpy)
-            else:
-                rotation = R.from_euler('xyz', [0, 0, 0])
-            
-            # Plot gate position
-            ax.scatter(pos[0], pos[1], pos[2], color='red', s=100, marker='^', label=f'Gate {i+1}' if i==0 else "")
-            
-            # Visualize gate orientation with vectors
-            normal = rotation.apply([1.0, 0.0, 0.0])
-            ax.quiver(pos[0], pos[1], pos[2], normal[0], normal[1], normal[2], 
-                      color='g', length=0.5, arrow_length_ratio=0.2, label='Gate Normal' if i==0 else "")
-        
-        # Plot obstacles if available
-        if "obstacles" in self.config.env.track:
-            obstacles = np.array([np.array(obs["pos"]) for obs in self.config.env.track["obstacles"]])
-            ax.scatter(obstacles[:, 0], obstacles[:, 1], obstacles[:, 2], color='red', s=100, marker='s', label='Obstacles')
-        
-        # Add labels and legend
-        ax.set_xlabel('X [m]')
-        ax.set_ylabel('Y [m]')
-        ax.set_zlabel('Z [m]')
-        ax.set_title('Drone Racing Waypoints')
-        ax.legend()
-        
-        # Make axis equal scale
-        max_range = np.array([
-            waypoints[:, 0].max() - waypoints[:, 0].min(),
-            waypoints[:, 1].max() - waypoints[:, 1].min(),
-            waypoints[:, 2].max() - waypoints[:, 2].min()
-        ]).max() / 2.0
-        
-        mid_x = (waypoints[:, 0].max() + waypoints[:, 0].min()) / 2
-        mid_y = (waypoints[:, 1].max() + waypoints[:, 1].min()) / 2
-        mid_z = (waypoints[:, 2].max() + waypoints[:, 2].min()) / 2
-        ax.set_xlim(mid_x - max_range, mid_x + max_range)
-        ax.set_ylim(mid_y - max_range, mid_y + max_range)
-        ax.set_zlim(mid_z - max_range, mid_z + max_range)
-        
-        plt.show(block=False)
 
-        # waypoints = np.array([
-        #     obs["obstacles_pos"][0] + [0.2, 0.5, -0.7],
-        #     obs["obstacles_pos"][0] + [0.2, -0.3, -0.7],
-        #     obs["gates_pos"][0] + 0.5 * (obs["obstacles_pos"][0] - [0, 0, 0.6] - obs["gates_pos"][0]),
-        #     obs["gates_pos"][0] + [-0.1, 0.1, 0],
-        #     obs["gates_pos"][0] + [-0.6, -0.2, 0],
-        #     obs["obstacles_pos"][1] + [-0.3, -0.3, -0.7],
-        #     obs["gates_pos"][1] + [-0.1, -0.2, 0],
-        #     obs["gates_pos"][1],
-        #     obs["gates_pos"][1] + [0.2, 0.5, 0],
-        #     obs["obstacles_pos"][0] + [-0.3, 0, -0.7],
-        #     obs["gates_pos"][2] + [0.2, -0.5, 0],
-        #     obs["gates_pos"][2] + [0.1, 0, 0],
-        #     obs["gates_pos"][2] + [0.1, 0.15, 0],
-        #     obs["gates_pos"][2] + [0.1, 0.15, 1],
-        #     obs["obstacles_pos"][3] + [0.4, 0.3, -0.2],
-        #     obs["obstacles_pos"][3] + [0.4, 0, -0.2],
-        #     obs["gates_pos"][3],
-        #     obs["gates_pos"][3] + [0, -0.5, 0],
-        # ])
         # Same waypoints as in the trajectory controller. Determined by trial and error.
         # waypoints = np.array(
         #     [
@@ -347,7 +291,7 @@ class MPController(Controller):
         self.z_des = cs_z(ts)
 
         self.N = 30
-        self.T_HORIZON = 2.5
+        self.T_HORIZON = 1.5
         self.dt = self.T_HORIZON / self.N
         self.x_des = np.concatenate((self.x_des, [self.x_des[-1]] * (2 * self.N + 1)))
         self.y_des = np.concatenate((self.y_des, [self.y_des[-1]] * (2 * self.N + 1)))
@@ -361,44 +305,142 @@ class MPController(Controller):
         self.config = config
         self.finished = False
 
-    def _generate_waypoints(self, obs):
-        """Generate waypoints that properly navigate through vertical gates"""
+    def _generate_waypoints(self, obs: dict[str, NDArray[np.floating]]) -> np.ndarray:
+        """Generate waypoints that properly navigate through vertical gates and avoid obstacles."""
         waypoints = []
-        
+
         # Add starting position
         waypoints.append(self.start_pos)
-        
+
         # For each gate, create waypoints that approach and pass through the gate correctly
         for i, gate in enumerate(self.config.env.track["gates"]):
             pos = np.array(gate["pos"])
-            
+
             # Get gate orientation
             if "rpy" in gate:
                 rpy = np.array(gate["rpy"])
-                rotation = R.from_euler('xyz', rpy)
+                rotation = R.from_euler("xyz", rpy)
             else:
-                rotation = R.from_euler('xyz', [0, 0, 0])
-            
+                rotation = R.from_euler("xyz", [0, 0, 0])
+
             # Get normal vector (perpendicular to gate plane)
-            normal = rotation.apply([1.0, 0.0, 0.0])
-            
+            if rpy[2] >= 0:
+                factor = 1.0
+            else:
+                factor = -1.0
+            normal = rotation.apply([factor, 0.0, 0.0])
+
             # Create pre-gate and post-gate waypoints along the normal direction
-            approach_dist = 0.5  # Distance before gate
-            exit_dist = 0.5    # Distance after gate
-            
+            approach_dist = 0.6  # Distance before gate
+            exit_dist = 0.6  # Distance after gate
+
             # Approach waypoint - ensure we approach from the correct direction
             approach_point = pos - normal * approach_dist
-            
+            print(f"Approach Point: {approach_point}")
+
             # Exit waypoint - continue in same direction after gate
             exit_point = pos + normal * exit_dist
-            
+
             # Add waypoints to approach and exit the gate correctly
             waypoints.append(approach_point)
             waypoints.append(pos)  # Gate center
             waypoints.append(exit_point)
-        
+
         # Convert list to numpy array
-        return np.array(waypoints)
+        initial_waypoints = np.array(waypoints)
+
+        # Now check for obstacles and add detour waypoints if needed
+        if "obstacles" in self.config.env.track:
+            safety_margin = 0.3  # 30cm minimum distance from obstacles
+            final_waypoints = []
+
+            # Check each segment of the path
+            for i in range(len(initial_waypoints) - 1):
+                start_point = initial_waypoints[i]
+                end_point = initial_waypoints[i + 1]
+                final_waypoints.append(start_point)
+
+                # Check against all obstacles
+                for obstacle in self.config.env.track["obstacles"]:
+                    obs_pos = np.array(obstacle["pos"])
+
+                    # Check if this path segment passes too close to an obstacle
+                    if self._segment_obstacle_collision(
+                        start_point, end_point, obs_pos, safety_margin
+                    ):
+                        # Calculate detour waypoints
+                        detour = self._calculate_obstacle_detour(
+                            start_point, end_point, obs_pos, safety_margin
+                        )
+                        final_waypoints.extend(detour)
+
+            # Add the last waypoint
+            final_waypoints.append(initial_waypoints[-1])
+            return np.array(final_waypoints)
+
+        return initial_waypoints
+
+    def _segment_obstacle_collision(
+        self, p1: np.ndarray, p2: np.ndarray, obstacle: np.ndarray, margin: float
+    ) -> bool:
+        """Check if a path segment passes too close to an obstacle."""
+        # Vector from p1 to p2
+        v = p2 - p1
+        # Length of the segment
+        segment_length = np.linalg.norm(v)
+        # Unit vector in direction from p1 to p2
+        v_unit = v / segment_length if segment_length > 0 else v
+
+        # Vector from p1 to obstacle
+        w = obstacle - p1
+
+        # Projection of w onto v
+        proj_scalar = np.dot(w, v_unit)
+
+        # Calculate closest point on segment to obstacle
+        if proj_scalar < 0:  # Closest point is p1
+            closest = p1
+        elif proj_scalar > segment_length:  # Closest point is p2
+            closest = p2
+        else:  # Closest point is along the segment
+            closest = p1 + proj_scalar * v_unit
+
+        # Check distance to closest point
+        distance = np.linalg.norm(obstacle - closest)
+        return distance < margin
+
+    def _calculate_obstacle_detour(
+        self, start: np.ndarray, end: np.ndarray, obstacle: np.ndarray, margin: float
+    ) -> list[np.ndarray]:
+        """Calculate waypoints to detour around an obstacle."""
+        # Find perpendicular direction to go around obstacle
+        path_direction = end - start
+        path_direction = path_direction / np.linalg.norm(path_direction)
+
+        # Find vector from path to obstacle
+        start_to_obs = obstacle - start
+
+        # Get perpendicular component
+        perp_component = start_to_obs - np.dot(start_to_obs, path_direction) * path_direction
+
+        if np.linalg.norm(perp_component) < 1e-6:
+            # If obstacle is directly on path, choose arbitrary perpendicular
+            perp = np.array([-path_direction[1], path_direction[0], 0])
+            if np.linalg.norm(perp) < 1e-6:  # If path is vertical
+                perp = np.array([0, -path_direction[2], path_direction[1]])
+        else:
+            # Use the perpendicular direction from path to obstacle
+            perp = perp_component / np.linalg.norm(perp_component)
+
+        # Calculate detour distance (add a buffer to the margin)
+        detour_dist = margin + 0.2  # 0.2m extra buffer
+
+        # Create detour waypoints
+        midpoint = (start + end) / 2
+        detour_point = midpoint + detour_dist * perp
+
+        # Return the detour waypoints
+        return [detour_point]
 
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
@@ -506,3 +548,14 @@ class MPController(Controller):
     def episode_callback(self):
         """Reset the integral error."""
         self._tick = 0
+
+    def get_predicted_trajectory(self) -> np.ndarray:
+        """Return the MPC's predicted trajectory over the horizon."""
+        pred_traj = []
+
+        # For acados implementation
+        for i in range(self.N):
+            x = self.acados_ocp_solver.get(i, "x")
+            pred_traj.append(x[:3])  # Extract position (x,y,z) from state
+
+        return np.array(pred_traj)
