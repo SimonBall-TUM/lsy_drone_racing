@@ -62,8 +62,8 @@ class DataLogger:
             "action": action.tolist(),
             "obs": {k: v.tolist() for k, v in obs.items()},
             "reward": reward,
-            "terminated": terminated,
-            "truncated": truncated,
+            "terminated": bool(terminated),
+            "truncated": bool(truncated),
             "info": info,
         }
         self.step_log_file.write(json.dumps(step_data) + "\n")
