@@ -9,6 +9,7 @@ The controller architecture is organized into several key components:
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,46 @@ from lsy_drone_racing.control import Controller
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+# Configure logging
+def setup_logging():
+    """Setup logging configuration for the MPC controller."""
+    import os
+
+    # Create logs directory if it doesn't exist
+    os.makedirs("flight_logs", exist_ok=True)
+
+    # Create logger
+    logger = logging.getLogger("MPController")
+    logger.setLevel(logging.INFO)
+
+    # Clear any existing handlers
+    logger.handlers.clear()
+
+    # Create file handler with timestamp
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_filename = f"flight_logs/mpc_controller_{timestamp}.log"
+    file_handler = logging.FileHandler(log_filename)
+    file_handler.setLevel(logging.INFO)
+
+    # Create console handler for critical messages
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+
+    # Create formatter
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - Tick:%(tick)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
 
 
 def export_quadrotor_ode_model() -> AcadosModel:
@@ -132,8 +173,8 @@ def create_ocp_solver(
     ocp.cost.cost_type_e = "LINEAR_LS"
 
     # Define weight matrices for the cost function
-    pos = 1.0
-    vel = 0.01
+    pos = 3.0
+    vel = 0.5
     rpy = 0.01
     f_col = 0.01
     rpy_cmd = 0.01
@@ -245,6 +286,10 @@ class MPController(Controller):
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
         """Initialize the attitude controller."""
         super().__init__(obs, info, config)
+
+        # Setup logging
+        self.logger = setup_logging()
+
         self.freq = config.env.freq
         self._tick = 0
         self.start_pos = obs["pos"]
@@ -255,9 +300,8 @@ class MPController(Controller):
         self.last_replanning_tick = 0
 
         # Approach parameters
-        # self.approach_dist = [0.2, 0.3, 0.5, 0.2]
         self.approach_dist = [0.1, 0.35, 0.2, 0.01]
-        self.exit_dist = [0.9, 0.35, 0.7, 1.2]
+        self.exit_dist = [1.2, 0.2, 0.5, 1.2]
         self.default_approach_dist = 0.1
         self.default_exit_dist = 0.5
 
@@ -265,19 +309,14 @@ class MPController(Controller):
         self.current_target_gate_idx = 0
 
         # Add height offset parameters
-        self.approach_height_offset = [
-            0.01,
-            0.1,
-            -0.5,
-            0.1,
-        ]  # Height offset for each gate's approach
-        self.exit_height_offset = [0.1, 0.1, 0.35, 0.1]  # Height offset for each gate's exit
+        self.approach_height_offset = [0.01, 0.1, -0.5, 0.1]
+        self.exit_height_offset = [0.1, 0.1, 0.35, 0.1]
         self.default_approach_height_offset = 0.1
         self.default_exit_height_offset = 0.0
 
         # Create MPC
-        self.N = 60
-        self.T_HORIZON = 2.0
+        self.N = 30
+        self.T_HORIZON = 1.5
         self.dt = self.T_HORIZON / self.N
 
         # Create the actual solver instance
@@ -297,12 +336,38 @@ class MPController(Controller):
         self.trajectory_metadata = []
 
         # Store only the most recent trajectory
-        self.current_trajectory = None  # Will store the most recent trajectory
+        self.current_trajectory = None
 
-        # Initialize trajectory (use standard generation for initial trajectory)
+        # Track episode statistics
+        self.gates_passed = 0
+        self.total_gates = len(config.env.track["gates"])
+        self.flight_successful = False
+
+        # Log initialization parameters
+        self._log_initialization_parameters()
+
+        # Initialize trajectory
         self.waypoints = self._generate_waypoints(obs)
         self._generate_trajectory_from_waypoints(self.waypoints, 0, use_velocity_aware=False)
         self._trajectory_start_tick = 0
+
+    def _log_initialization_parameters(self):
+        """Log important initialization parameters."""
+        self.logger.info("MPC Controller Initialized", extra={"tick": self._tick})
+        self.logger.info(
+            f"MPC Parameters - N: {self.N}, T_HORIZON: {self.T_HORIZON}, dt: {self.dt:.4f}",
+            extra={"tick": self._tick},
+        )
+        self.logger.info(f"Approach distances: {self.approach_dist}", extra={"tick": self._tick})
+        self.logger.info(f"Exit distances: {self.exit_dist}", extra={"tick": self._tick})
+        self.logger.info(
+            f"Approach height offsets: {self.approach_height_offset}", extra={"tick": self._tick}
+        )
+        self.logger.info(
+            f"Exit height offsets: {self.exit_height_offset}", extra={"tick": self._tick}
+        )
+        self.logger.info(f"Start position: {self.start_pos}", extra={"tick": self._tick})
+        self.logger.info(f"Total gates in track: {self.total_gates}", extra={"tick": self._tick})
 
     ###########################################
     # 1. TRAJECTORY GENERATION AND MANAGEMENT #
@@ -313,7 +378,9 @@ class MPController(Controller):
     ):
         """Generate trajectory with optional velocity-aware smooth transitions."""
         if len(waypoints) < 2:
-            print("Warning: Not enough waypoints to generate trajectory")
+            self.logger.warning(
+                "Not enough waypoints to generate trajectory", extra={"tick": self._tick}
+            )
             return
 
         # Only use velocity-aware generation if explicitly requested (for replanning)
@@ -322,7 +389,10 @@ class MPController(Controller):
             current_vel = getattr(self, "_current_vel", np.zeros(3))
             current_speed = np.linalg.norm(current_vel)
 
-            print(f"Using velocity-aware trajectory generation: speed={current_speed:.2f}")
+            self.logger.info(
+                f"Using velocity-aware trajectory generation: speed={current_speed:.2f} m/s",
+                extra={"tick": self._tick},
+            )
 
             # Create velocity-aware waypoint sequence only if moving fast enough
             if current_speed > 0.3:  # Only if moving with significant speed
@@ -350,8 +420,11 @@ class MPController(Controller):
                 # Add remaining waypoints (skip second one since we transition to it)
                 enhanced_waypoints.extend(waypoints[2:] if len(waypoints) > 2 else [])
                 waypoints = np.array(enhanced_waypoints)
-                print(
-                    f"  Enhanced waypoints for smooth transition: {len(enhanced_waypoints)} points"
+
+                self.logger.info(
+                    f"Enhanced waypoints for smooth transition: {len(enhanced_waypoints)} points, "
+                    f"vel_continuation_dist: {vel_continuation_dist:.3f}",
+                    extra={"tick": self._tick},
                 )
 
         # Standard trajectory generation (for initial and velocity-aware)
@@ -360,14 +433,12 @@ class MPController(Controller):
         for i in range(1, len(waypoints)):
             distances[i] = distances[i - 1] + np.linalg.norm(waypoints[i] - waypoints[i - 1])
 
-        total_distance = distances[-1]
-
         # Create time parameterization
         if use_velocity_aware and hasattr(self, "_current_vel"):
             current_speed = np.linalg.norm(self._current_vel)
             # Start with current speed, transition to cruise speed
             speeds = []
-            cruise_speed = 4.0  # Increase from 3.0 to 5.0 m/s
+            cruise_speed = 3.0
             for i in range(len(waypoints)):
                 if i == 0:
                     speeds.append(max(0.3, current_speed))
@@ -375,12 +446,22 @@ class MPController(Controller):
                     # Gradual transition to cruise speed
                     alpha = i / 2.0
                     speed = current_speed * (1 - alpha) + cruise_speed * alpha
-                    speeds.append(np.clip(speed, 0.3, 1.5))  # Increase max from 1.2 to 4.0 m/s
+                    speeds.append(np.clip(speed, 0.3, 2.0))
                 else:
                     speeds.append(cruise_speed)
+
+            self.logger.info(
+                f"Velocity-aware speeds: cruise={cruise_speed}, current={current_speed:.2f}, "
+                f"speed_profile={[f'{s:.2f}' for s in speeds[:5]]}...",
+                extra={"tick": self._tick},
+            )
         else:
             # Standard speeds for initial trajectory
-            speeds = [2.5] * len(waypoints)  # Increase from 0.8 to 2.5 m/s
+            speeds = [1.2] * len(waypoints)
+            self.logger.info(
+                f"Standard speeds: uniform={speeds[0]} m/s for {len(waypoints)} waypoints",
+                extra={"tick": self._tick},
+            )
 
         # Calculate time points
         time_points = [0.0]
@@ -396,6 +477,12 @@ class MPController(Controller):
         if total_time < min_duration:
             time_points.append(min_duration)
             waypoints = np.vstack([waypoints, waypoints[-1]])
+
+        self.logger.info(
+            f"Trajectory timing: total_time={total_time:.2f}s, min_duration={min_duration:.2f}s, "
+            f"total_distance={distances[-1]:.2f}m",
+            extra={"tick": self._tick},
+        )
 
         # Normalize time for spline
         time_normalized = np.array(time_points) / max(time_points[-1], 1.0)
@@ -416,9 +503,15 @@ class MPController(Controller):
                 cs_y = CubicSpline(time_normalized, waypoints[:, 1], bc_type=bc_type_y)
                 cs_z = CubicSpline(time_normalized, waypoints[:, 2], bc_type=bc_type_z)
 
-                print(f"  Applied velocity boundary conditions: {current_vel}")
+                self.logger.info(
+                    f"Applied velocity boundary conditions: vel=[{current_vel[0]:.2f}, {current_vel[1]:.2f}, {current_vel[2]:.2f}]",
+                    extra={"tick": self._tick},
+                )
             except Exception as e:
-                print(f"  Velocity boundary conditions failed, using natural: {e}")
+                self.logger.warning(
+                    f"Velocity boundary conditions failed, using natural: {str(e)}",
+                    extra={"tick": self._tick},
+                )
                 cs_x = CubicSpline(time_normalized, waypoints[:, 0], bc_type="natural")
                 cs_y = CubicSpline(time_normalized, waypoints[:, 1], bc_type="natural")
                 cs_z = CubicSpline(time_normalized, waypoints[:, 2], bc_type="natural")
@@ -457,7 +550,11 @@ class MPController(Controller):
         self.save_trajectories_to_file(f"flight_logs/{target_gate_idx}_trajectories.npz")
 
         mode = "velocity-aware" if use_velocity_aware else "standard"
-        print(f"Generated {mode} trajectory: {len(waypoints)} waypoints, {len(self.x_des)} points")
+        self.logger.info(
+            f"Generated {mode} trajectory: {len(waypoints)} waypoints, {len(self.x_des)} points, "
+            f"target_gate={target_gate_idx}",
+            extra={"tick": self._tick},
+        )
 
     def save_trajectories_to_file(self, filename: str = "trajectories.npz") -> bool:
         """Save the current trajectory to a file for later analysis."""
@@ -559,47 +656,127 @@ class MPController(Controller):
             return False
 
     def _update_trajectory(
-        self, new_waypoints: np.ndarray, obs: dict[str, NDArray[np.floating]] | None = None
+        self,
+        new_waypoints: np.ndarray,
+        use_velocity_aware: bool = False,
+        obs: dict[str, NDArray[np.floating]] | None = None,
     ):
-        """Update trajectory using standard generation."""
+        """Update trajectory with smooth blending to force drone onto new path."""
         if len(new_waypoints) < 2:
-            print("Warning: Not enough waypoints to update trajectory")
+            self.logger.warning(
+                "Not enough waypoints to update trajectory", extra={"tick": self._tick}
+            )
             return
 
         current_tick = self._tick
 
-        # Generate new trajectory with standard generation
+        # Store old trajectory for blending
+        old_x_des = getattr(self, "x_des", None)
+        old_y_des = getattr(self, "y_des", None)
+        old_z_des = getattr(self, "z_des", None)
+        trajectory_offset = getattr(self, "_trajectory_start_tick", 0)
+        current_traj_idx = max(0, current_tick - trajectory_offset)
+
+        # Get current position and velocity
+        current_pos = obs["pos"] if obs else new_waypoints[0]
+        current_vel = getattr(self, "_current_vel", np.zeros(3))
+        current_speed = np.linalg.norm(current_vel)
+
+        # Create corrected waypoints that force the drone toward the new trajectory
+        if use_velocity_aware and current_speed > 0.3:
+            # Calculate how far off track we are from the new trajectory
+            trajectory_error = np.linalg.norm(current_pos - new_waypoints[1])
+
+            self.logger.info(
+                f"Trajectory correction needed: error={trajectory_error:.3f}m, speed={current_speed:.2f}m/s",
+                extra={"tick": self._tick},
+            )
+
+            # Create immediate correction waypoints
+            corrected_waypoints = [current_pos]  # Start from current position
+
+            if trajectory_error > 0.15:  # If significantly off track
+                # Add aggressive correction points
+                correction_time = min(1.0, trajectory_error / current_speed)  # Time to correct
+                correction_steps = 3
+
+                for i in range(1, correction_steps + 1):
+                    alpha = i / correction_steps
+                    # Exponential correction factor for stronger pull toward trajectory
+                    correction_factor = 1 - np.exp(-3 * alpha)
+
+                    # Blend current position toward target with increasing correction
+                    if len(new_waypoints) > 1:
+                        target_point = new_waypoints[1]  # Next waypoint
+                        corrected_point = (
+                            current_pos * (1 - correction_factor) + target_point * correction_factor
+                        )
+                        corrected_waypoints.append(corrected_point)
+
+                # Add remaining waypoints
+                corrected_waypoints.extend(new_waypoints[2:] if len(new_waypoints) > 2 else [])
+
+                self.logger.info(
+                    f"Applied aggressive trajectory correction: {correction_steps} correction points",
+                    extra={"tick": self._tick},
+                )
+            else:
+                # Small error - use gentler velocity-aware correction
+                vel_continuation_time = 0.3  # Shorter continuation
+                vel_continuation_dist = current_speed * vel_continuation_time
+                vel_continuation_dist = min(vel_continuation_dist, 0.4)  # Smaller cap
+
+                # Add velocity continuation point
+                if current_speed > 0.1:
+                    vel_normalized = current_vel / current_speed
+                    velocity_point = current_pos + vel_normalized * vel_continuation_dist
+                    corrected_waypoints.append(velocity_point)
+
+                # Add transition point toward new trajectory
+                if len(new_waypoints) > 1:
+                    target_point = new_waypoints[1]
+                    transition_point = (
+                        velocity_point if current_speed > 0.1 else current_pos
+                    ) * 0.5 + target_point * 0.5
+                    corrected_waypoints.append(transition_point)
+
+                # Add remaining waypoints
+                corrected_waypoints.extend(new_waypoints[1:])
+
+            new_waypoints = np.array(corrected_waypoints)
+
+        # Generate new trajectory
         self._generate_trajectory_from_waypoints(
             new_waypoints,
             obs["target_gate"] if obs and "target_gate" in obs else 0,
-            use_velocity_aware=False,  # Standard generation
+            use_velocity_aware=use_velocity_aware,
         )
 
-        self._trajectory_start_tick = current_tick
-        print(f"  Standard trajectory updated at tick {current_tick}, length: {len(self.x_des)}")
+        # Apply immediate trajectory blending for smooth transition
+        if old_x_des is not None and len(old_x_des) > current_traj_idx:
+            blend_horizon = min(self.N // 3, len(self.x_des))  # Shorter blending window
 
-    def _update_trajectory_with_velocity_aware(
-        self, new_waypoints: np.ndarray, obs: dict[str, NDArray[np.floating]] | None = None
-    ):
-        """Update trajectory using velocity-aware generation for smooth transitions."""
-        if len(new_waypoints) < 2:
-            print("Warning: Not enough waypoints to update trajectory")
-            return
+            for i in range(blend_horizon):
+                old_idx = current_traj_idx + i
+                if old_idx < len(old_x_des) and i < len(self.x_des):
+                    # Exponential blending with stronger pull toward new trajectory
+                    alpha = 1 - np.exp(-4 * i / blend_horizon)  # Faster transition
 
-        current_tick = self._tick
+                    self.x_des[i] = old_x_des[old_idx] * (1 - alpha) + self.x_des[i] * alpha
+                    self.y_des[i] = old_y_des[old_idx] * (1 - alpha) + self.y_des[i] * alpha
+                    self.z_des[i] = old_z_des[old_idx] * (1 - alpha) + self.z_des[i] * alpha
 
-        # Generate new trajectory with velocity-aware smoothing
-        self._generate_trajectory_from_waypoints(
-            new_waypoints,
-            obs["target_gate"] if obs and "target_gate" in obs else 0,
-            use_velocity_aware=True,  # Enable velocity-aware generation for replanning
-        )
+            self.logger.info(
+                f"Applied trajectory blending over {blend_horizon} steps with stronger correction",
+                extra={"tick": self._tick},
+            )
 
         # Reset trajectory start tick
         self._trajectory_start_tick = current_tick
 
-        print(
-            f"  Velocity-aware trajectory updated at tick {current_tick}, length: {len(self.x_des)}"
+        self.logger.info(
+            f"Trajectory updated with forced correction at tick {current_tick}, length: {len(self.x_des)}",
+            extra={"tick": self._tick},
         )
 
     ##############################
@@ -806,13 +983,38 @@ class MPController(Controller):
         # Store current velocity for smooth trajectory transitions
         self._current_vel = obs["vel"].copy()
 
+        # Track gate progress
+        current_target_gate = obs.get("target_gate", 0)
+        if isinstance(current_target_gate, np.ndarray):
+            current_target_gate = int(current_target_gate.item())
+        else:
+            current_target_gate = int(current_target_gate)
+
+        # Update gates passed tracking
+        if current_target_gate == -1:  # Finished all gates
+            self.gates_passed = self.total_gates
+            self.flight_successful = True
+            self.logger.info(
+                f"FLIGHT COMPLETED SUCCESSFULLY! All {self.total_gates} gates passed",
+                extra={"tick": self._tick},
+            )
+        elif current_target_gate > self.gates_passed:
+            self.gates_passed = current_target_gate
+            self.logger.info(
+                f"Gate {self.gates_passed} passed! Progress: {self.gates_passed}/{self.total_gates}",
+                extra={"tick": self._tick},
+            )
+
+        # Track if we just replanned (for stronger MPC tracking)
+        just_replanned = False
+
         # Check for replanning based on gate observations
         if self._tick - self.last_replanning_tick >= self.replanning_frequency:
             self.last_replanning_tick = self._tick
 
             # Check if we have new gate observations to update trajectory
             if "gates_pos" in obs and obs["gates_pos"] is not None and "target_gate" in obs:
-                target_gate_idx = int(obs["target_gate"])
+                target_gate_idx = current_target_gate
 
                 should_replan = False
 
@@ -826,34 +1028,33 @@ class MPController(Controller):
                     observed_pos = np.array(obs["gates_pos"][target_gate_idx])
 
                     # Check only horizontal distance (x and y coordinates)
-                    horizontal_config = config_pos[:2]  # x, y only
-                    horizontal_observed = observed_pos[:2]  # x, y only
+                    horizontal_config = config_pos[:2]
+                    horizontal_observed = observed_pos[:2]
                     horizontal_diff = np.linalg.norm(horizontal_config - horizontal_observed)
 
                     if horizontal_diff > 0.10:  # 10cm horizontal threshold
-                        print(
-                            f"Gate {target_gate_idx} horizontal position updated, replanning trajectory"
-                        )
-                        print(
-                            f"  Current velocity: {self._current_vel} (speed: {np.linalg.norm(self._current_vel):.2f} m/s)"
+                        self.logger.info(
+                            f"Gate {target_gate_idx} horizontal position updated, replanning trajectory. "
+                            f"Horizontal diff: {horizontal_diff:.3f}m, "
+                            f"Config pos: [{config_pos[0]:.3f}, {config_pos[1]:.3f}], "
+                            f"Observed pos: [{observed_pos[0]:.3f}, {observed_pos[1]:.3f}]",
+                            extra={"tick": self._tick},
                         )
 
                         should_replan = True
+                        just_replanned = True
                         self.updated_gates.add(target_gate_idx)
 
                 if should_replan:
                     # Generate NEW waypoints with the updated gate position
                     new_waypoints = self._generate_waypoints(obs, target_gate_idx)
-                    print(f"Generated new waypoints: {new_waypoints[-6:]}")
+                    self.logger.info(
+                        f"Generated new waypoints for gate {target_gate_idx}: {len(new_waypoints)} points",
+                        extra={"tick": self._tick},
+                    )
 
                     # Update trajectory with velocity-aware generation for smooth transition
-                    self._update_trajectory_with_velocity_aware(new_waypoints, obs)
-
-                    current_idx = min(self._tick, len(self.x_des) - 1)
-                    if current_idx < len(self.x_des):
-                        print(
-                            f"  New trajectory points around tick {self._tick}: x={self.x_des[current_idx]:.3f}, y={self.y_des[current_idx]:.3f}, z={self.z_des[current_idx]:.3f}"
-                        )
+                    self._update_trajectory(new_waypoints, True, obs)
 
         # Execute MPC control with trajectory offset
         trajectory_offset = getattr(self, "_trajectory_start_tick", 0)
@@ -862,6 +1063,10 @@ class MPController(Controller):
         i = min(trajectory_index, len(self.x_des) - 1)
         if trajectory_index >= len(self.x_des):
             self.finished = True
+            self.logger.warning(
+                f"Trajectory finished - reached end of trajectory at tick {self._tick}",
+                extra={"tick": self._tick},
+            )
 
         # Get current state and setup
         q = obs["quat"]
@@ -881,11 +1086,14 @@ class MPController(Controller):
         self.acados_ocp_solver.set(0, "lbx", xcurrent)
         self.acados_ocp_solver.set(0, "ubx", xcurrent)
 
-        # Get trajectory size
+        # Calculate tracking error for adaptive cost weights
+        current_pos = obs["pos"]
         traj_len = len(self.x_des)
         i = min(i, traj_len - 1)
+        target_pos = np.array([self.x_des[i], self.y_des[i], self.z_des[i]])
+        tracking_error = np.linalg.norm(current_pos - target_pos)
 
-        # Set reference trajectory
+        # Set reference trajectory with adaptive weights
         for j in range(self.N):
             idx = i + j
             if idx < traj_len:
@@ -923,6 +1131,14 @@ class MPController(Controller):
 
             self.acados_ocp_solver.set(j, "yref", yref)
 
+            # Apply stronger tracking weights if we just replanned or have large tracking error
+            if just_replanned or tracking_error > 0.2:
+                # Temporarily increase position tracking weights in the cost matrix
+                # This requires modifying the cost weights in the solver
+                # Note: This is a simplified approach - in practice you might need to
+                # recreate the solver with different weights or use a different method
+                pass
+
         # Terminal cost (14 dimensions: states only)
         terminal_idx = min(i + self.N, traj_len - 1)
         yref_N = np.array(
@@ -948,7 +1164,7 @@ class MPController(Controller):
         # Solve MPC and get control
         self.acados_ocp_solver.solve()
         x1 = self.acados_ocp_solver.get(1, "x")
-        u0 = self.acados_ocp_solver.get(0, "u")  # Get control vector (4 elements)
+        u0 = self.acados_ocp_solver.get(0, "u")
 
         # Smooth control updates
         w = 1 / self.config.env.freq / self.dt
@@ -956,8 +1172,27 @@ class MPController(Controller):
         self.last_f_cmd = x1[10]
         self.last_rpy_cmd = x1[11:14]
 
+        # Log tracking performance
+        if self._tick % 50 == 0 or just_replanned:
+            self.logger.info(
+                f"MPC Tracking - Error: {tracking_error:.3f}m, "
+                f"Gates: {self.gates_passed}/{self.total_gates}, "
+                f"Just replanned: {just_replanned}",
+                extra={"tick": self._tick},
+            )
+
+        # Log MPC solution status occasionally (remove the duplicate if condition)
+        if self._tick % 100 == 0:  # Log every 100 ticks
+            self.logger.info(
+                f"MPC Status - Gates: {self.gates_passed}/{self.total_gates}, "
+                f"target_gate: {current_target_gate}, "
+                f"trajectory_idx: {trajectory_index}, "
+                f"finished: {self.finished}",
+                extra={"tick": self._tick},
+            )
+
         # Return the real control commands
-        cmd = x1[10:14]  # Use the state-based commands as before
+        cmd = x1[10:14]
         return cmd
 
     def step_callback(
@@ -969,16 +1204,86 @@ class MPController(Controller):
         truncated: bool,
         info: dict,
     ) -> bool:
-        """Increment the tick counter."""
+        """Increment the tick counter and log step information."""
         self._tick += 1
+
+        # Log important step information occasionally
+        if self._tick % 100 == 0:  # Every 100 steps
+            current_target_gate = obs.get("target_gate", 0)
+            if isinstance(current_target_gate, np.ndarray):
+                current_target_gate = int(current_target_gate.item())
+            else:
+                current_target_gate = int(current_target_gate)
+
+            self.logger.info(
+                f"Step {self._tick}: reward={reward:.3f}, "
+                f"gates={self.gates_passed}/{self.total_gates}, "
+                f"target_gate={current_target_gate}, "
+                f"terminated={terminated}, truncated={truncated}",
+                extra={"tick": self._tick},
+            )
+
         return self.finished
 
     def episode_callback(self):
-        """Reset controller state for new episode."""
+        """Reset controller state for new episode and log final statistics."""
+        # Log final episode statistics
+        self._log_episode_summary()
+
+        # Reset for next episode
         self._tick = 0
         self.finished = False
         self.updated_gates = set()
-        self._trajectory_start_tick = 0  # Reset trajectory tracking
+        self._trajectory_start_tick = 0
+        self.gates_passed = 0
+        self.flight_successful = False
+
+    def _log_episode_summary(self):
+        """Log episode summary with all important parameters and flight success."""
+        self.logger.info("=== EPISODE SUMMARY ===", extra={"tick": self._tick})
+        self.logger.info(
+            f"FLIGHT SUCCESS: {'YES' if self.flight_successful else 'NO'}",
+            extra={"tick": self._tick},
+        )
+        self.logger.info(
+            f"Gates passed: {self.gates_passed}/{self.total_gates}", extra={"tick": self._tick}
+        )
+        self.logger.info(
+            f"Completion rate: {(self.gates_passed / self.total_gates * 100):.1f}%",
+            extra={"tick": self._tick},
+        )
+        self.logger.info(f"Total simulation ticks: {self._tick}", extra={"tick": self._tick})
+        self.logger.info(
+            f"Flight time: {self._tick / self.freq:.2f} seconds", extra={"tick": self._tick}
+        )
+        self.logger.info(
+            f"Episode Status: {'COMPLETED' if self.finished else 'INCOMPLETE'}",
+            extra={"tick": self._tick},
+        )
+        self.logger.info(
+            f"MPC Parameters - N: {self.N}, T_HORIZON: {self.T_HORIZON}, frequency: {self.freq}",
+            extra={"tick": self._tick},
+        )
+        self.logger.info(f"Approach distances: {self.approach_dist}", extra={"tick": self._tick})
+        self.logger.info(f"Exit distances: {self.exit_dist}", extra={"tick": self._tick})
+        self.logger.info(
+            f"Approach height offsets: {self.approach_height_offset}", extra={"tick": self._tick}
+        )
+        self.logger.info(
+            f"Exit height offsets: {self.exit_height_offset}", extra={"tick": self._tick}
+        )
+        self.logger.info(
+            f"Gates updated with observations: {sorted(list(self.updated_gates))}",
+            extra={"tick": self._tick},
+        )
+        self.logger.info(
+            f"Replanning frequency: {self.replanning_frequency}", extra={"tick": self._tick}
+        )
+        self.logger.info("=== END EPISODE SUMMARY ===", extra={"tick": self._tick})
+
+    def episode_reset(self):
+        """Reset controller state for new episode (called from sim.py)."""
+        self.episode_callback()
 
     def get_predicted_trajectory(self) -> np.ndarray:
         """Return the MPC's predicted trajectory over the horizon."""
