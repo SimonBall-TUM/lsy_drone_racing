@@ -11,3 +11,13 @@ saves
 **/*.csv
 plots/
 c_generated_code/
+
+# MPC Controller log files
+flight_logs/
+flight_logs/*.log
+flight_logs/*.npz
+
+# Alternative specific patterns if you want more control
+*.log
+flight_logs/mpc_controller_*.log
+flight_logs/*_trajectories.npz
