@@ -69,8 +69,8 @@ def simulate(
         track=config.env.track,
         disturbances=config.env.get("disturbances"),
         randomizations=config.env.get("randomizations"),
-        # seed=config.env.seed,
-        seed=random.randint(1, 999999),
+        seed=config.env.seed,
+        # seed=random.randint(1, 999999),
     )
     env = JaxToNumpy(env)
 
@@ -133,6 +133,7 @@ def log_episode_stats(obs: dict, info: dict, config: ConfigDict, curr_time: floa
     logger.info(
         f"Flight time (s): {curr_time}\nFinished: {finished}\nGates passed: {gates_passed}\n"
     )
+    print(f"Flight time (s): {curr_time}\nFinished: {finished}\nGates passed: {gates_passed}\n")
 
 
 if __name__ == "__main__":
