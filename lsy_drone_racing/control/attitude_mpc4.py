@@ -20,6 +20,7 @@ from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation as R
 
 from lsy_drone_racing.control import Controller
+from lsy_drone_racing.utils import DataLogger
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -156,7 +157,7 @@ def create_ocp_solver(
     ocp.cost.cost_type_e = "LINEAR_LS"
 
     # Define weight matrices for the cost function
-    pos = 59.0
+    pos = 30.0
     vel = 0.01  # 0.01
     rpy = 0.1
     f_col = 0.01
@@ -260,24 +261,18 @@ class MPController(Controller):
         self.horizon_time = 2.5  # Or 2.5 seconds ahead
         self.min_horizon_points = 3  # Minimum points to maintain in horizon
 
-        # Approach parameters
-        # self.approach_dist = [0.2, 0.3, 0.5, 0.2]
-        self.approach_dist = [0.2, 0.2, 0.1, 0.2]
-        self.exit_dist = [1.3, 0.3, 0.1, 1]
-        self.default_approach_dist = 0.7
-        self.default_exit_dist = 0.5
-
         # Initialize target gate tracking
         self.current_target_gate_idx = 0
 
-        # Add height offset parameters
-        self.approach_height_offset = [
-            0.0,
-            0.0,
-            -0.1,
-            0.0,
-        ]  # Height offset for each gate's approach
-        self.exit_height_offset = [0.1, -0.05, 0.05, 0.1]  # Height offset for each gate's exit
+        # Approach parameters for different gates
+        self.approach_dist = [0.2, 0.35, 0.25, 0.01]
+        self.exit_dist = [0.7, 0.35, 0.5, 1.2]
+        self.default_approach_dist = 0.1
+        self.default_exit_dist = 0.5
+
+        # Height offset parameters
+        self.approach_height_offset = [0.01, 0.1, -0.2, 0.1]
+        self.exit_height_offset = [0.1, 0.1, 0.4, 0.1]
         self.default_approach_height_offset = 0.1
         self.default_exit_height_offset = 0.0
 
@@ -304,6 +299,9 @@ class MPController(Controller):
 
         # Store only the most recent trajectory
         self.current_trajectory = None  # Will store the most recent trajectory
+
+        # Data logger
+        self.logger = DataLogger()
 
         # Initialize trajectory
         self.waypoints = self._generate_waypoints(obs)
@@ -933,7 +931,7 @@ class MPController(Controller):
                     config_pos = np.array(self.config.env.track["gates"][target_gate_idx]["pos"])
                     observed_pos = np.array(obs["gates_pos"][target_gate_idx])
 
-                    if np.linalg.norm(config_pos - observed_pos) > 0.05:
+                    if np.linalg.norm(config_pos - observed_pos) > 0.13:
                         print(f"Gate {target_gate_idx} position updated, horizon replanning")
                         should_replan = True
                         self.updated_gates.add(target_gate_idx)
@@ -1054,6 +1052,7 @@ class MPController(Controller):
     ) -> bool:
         """Increment the tick counter."""
         self._tick += 1
+        self.logger.log_step(obs, action, reward, terminated, truncated, info)
         return self.finished
 
     def episode_callback(self):
@@ -1061,6 +1060,7 @@ class MPController(Controller):
         self._tick = 0
         self.finished = False
         self.updated_gates = set()
+        self.logger.store_episode()
 
     def get_predicted_trajectory(self) -> np.ndarray:
         """Return the MPC's predicted trajectory over the horizon."""

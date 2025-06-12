@@ -10,16 +10,24 @@ import time
 
 
 def setup_logging() -> logging.Logger:
-    """Setup logging configuration for the MPC controller."""
+    """Setup logging configuration for the MPC controller with NO console output."""
     # Create logs directory if it doesn't exist
     os.makedirs("flight_logs", exist_ok=True)
 
-    # Create logger
-    logger = logging.getLogger("MPController")
+    # Disable all existing loggers
+    logging.getLogger().handlers.clear()
+    logging.getLogger().setLevel(logging.CRITICAL)
+
+    # Create logger with unique name
+    logger_name = f"MPController_{int(time.time())}"
+    logger = logging.getLogger(logger_name)
     logger.setLevel(logging.INFO)
 
     # Clear any existing handlers
     logger.handlers.clear()
+
+    # Prevent propagation to root logger
+    logger.propagate = False
 
     # Create file handler with timestamp
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -27,21 +35,19 @@ def setup_logging() -> logging.Logger:
     file_handler = logging.FileHandler(log_filename)
     file_handler.setLevel(logging.INFO)
 
-    # Create console handler for critical messages
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
-
     # Create formatter
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - Tick:%(tick)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
 
-    # Add handlers to logger
+    # Add ONLY file handler
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+
+    # Disable root logger completely
+    root_logger = logging.getLogger()
+    root_logger.disabled = True
 
     return logger
 
@@ -50,10 +56,13 @@ class FlightLogger:
     """Enhanced logging utilities for flight data and performance metrics."""
 
     def __init__(self, logger_name: str = "MPController"):
-        """Initialize the flight logger."""
+        """Initialize the flight logger.
+
+        Args:
+            logger_name: Name of the logger
+        """
         self.logger = logging.getLogger(logger_name)
-        if not self.logger.handlers:
-            self.logger = setup_logging()
+        self.logger = setup_logging()
 
     def log_initialization(self, controller_params: dict, tick: int = 0):
         """Log controller initialization parameters."""
@@ -234,4 +243,5 @@ class FlightLogger:
 
     def log_error(self, message: str, tick: int = 0):
         """Log error message."""
+        self.logger.error(message, extra={"tick": tick})
         self.logger.error(message, extra={"tick": tick})

@@ -27,7 +27,7 @@ class MPController(Controller):
         """Initialize the attitude controller."""
         super().__init__(obs, info, config)
 
-        # Setup logging
+        # Setup enhanced logging with no console output
         self.flight_logger = FlightLogger("MPController")
 
         # Basic configuration
@@ -46,13 +46,13 @@ class MPController(Controller):
         self.last_replanning_tick = 0
 
         # Approach parameters for different gates
-        self.approach_dist = [0.1, 0.35, 0.2, 0.01]
-        self.exit_dist = [1.2, 0.2, 0.5, 1.2]
+        self.approach_dist = [0.2, 0.35, 0.25, 0.01]
+        self.exit_dist = [1.2, 0.35, 0.5, 1.2]
         self.default_approach_dist = 0.1
         self.default_exit_dist = 0.5
 
         # Height offset parameters
-        self.approach_height_offset = [0.01, 0.1, -0.4, 0.1]
+        self.approach_height_offset = [0.01, 0.1, -0.2, 0.1]
         self.exit_height_offset = [0.1, 0.1, 0.4, 0.1]
         self.default_approach_height_offset = 0.1
         self.default_exit_height_offset = 0.0
@@ -62,9 +62,9 @@ class MPController(Controller):
 
         # Create the MPC solver
         self.mpc_weights = {
-            "Q_pos": 7.0,  # Position tracking weight
-            "Q_vel": 0.5,  # Velocity tracking weight
-            "Q_rpy": 0.01,  # Attitude (roll/pitch/yaw) weight
+            "Q_pos": 2.9,  # Position tracking weight -2.3
+            "Q_vel": 0.1,  # Velocity tracking weight
+            "Q_rpy": 0.1,  # Attitude (roll/pitch/yaw) weight
             "Q_thrust": 0.01,  # Collective thrust weight
             "Q_cmd": 0.01,  # Command tracking weight
             "R": 0.007,  # Control input regularization weight

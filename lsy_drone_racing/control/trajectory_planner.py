@@ -95,7 +95,7 @@ class TrajectoryPlanner:
             current_speed = np.linalg.norm(current_vel)
             # Start with current speed, transition to cruise speed
             speeds = []
-            cruise_speed = 3.0
+            cruise_speed = 1.2  # 3.0
             for i in range(len(waypoints)):
                 if i == 0:
                     speeds.append(max(0.3, current_speed))
@@ -103,7 +103,7 @@ class TrajectoryPlanner:
                     # Gradual transition to cruise speed
                     alpha = i / 2.0
                     speed = current_speed * (1 - alpha) + cruise_speed * alpha
-                    speeds.append(np.clip(speed, 0.3, 2.0))
+                    speeds.append(np.clip(speed, 0.3, 1.2))  # 2.0
                 else:
                     speeds.append(cruise_speed)
 
@@ -116,7 +116,7 @@ class TrajectoryPlanner:
             self.logger.log_trajectory_update(speed_info, tick)
         else:
             # Standard speeds for initial trajectory
-            speeds = [1.2] * len(waypoints)
+            speeds = [1.3] * len(waypoints)
             speed_info = {
                 "mode": "standard",
                 "uniform_speed": speeds[0],
@@ -214,150 +214,6 @@ class TrajectoryPlanner:
             "target_gate": target_gate_idx,
         }
         self.logger.log_trajectory_update(final_info, tick)
-
-        return x_des, y_des, z_des
-
-    def update_trajectory_with_correction(
-        self,
-        new_waypoints: np.ndarray,
-        old_trajectory: tuple[np.ndarray, np.ndarray, np.ndarray],
-        current_pos: np.ndarray,
-        current_vel: np.ndarray,
-        current_tick: int,
-        trajectory_start_tick: int,
-        N: int,
-        target_gate_idx: int = 0,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Update trajectory with gentle correction - more conservative approach."""
-        if len(new_waypoints) < 2:
-            self.logger.log_warning("Not enough waypoints to update trajectory", current_tick)
-            return old_trajectory
-
-        # Store old trajectory for blending
-        old_x_des, old_y_des, old_z_des = old_trajectory
-        current_traj_idx = max(0, current_tick - trajectory_start_tick)
-
-        current_speed = np.linalg.norm(current_vel)
-
-        # GENTLE CORRECTION: Conservative but effective
-        if current_speed > 0.4:  # Higher speed threshold
-            # Calculate trajectory error
-            trajectory_error = np.linalg.norm(current_pos - new_waypoints[1])
-
-            correction_info = {
-                "type": "gentle_correction",
-                "trajectory_error": trajectory_error,
-                "current_speed": current_speed,
-                "correction_threshold": 0.20,
-            }
-            self.logger.log_trajectory_update(correction_info, current_tick)
-
-            # Create waypoints with gentle correction
-            corrected_waypoints = [current_pos]
-
-            # Apply correction only for larger errors
-            if trajectory_error > 0.20:  # Higher threshold - less sensitive
-                # Conservative parameters
-                correction_steps = 2  # Fewer correction points
-
-                # Calculate correction direction
-                target_point = new_waypoints[1] if len(new_waypoints) > 1 else new_waypoints[0]
-
-                # Create gentle correction sequence
-                for i in range(1, correction_steps + 1):
-                    alpha = i / correction_steps
-
-                    # Very gentle correction factor - mostly linear
-                    correction_factor = alpha  # Linear, no acceleration
-
-                    # STRONG velocity influence - preserve momentum
-                    vel_influence = 0.6 * (1 - alpha * 0.3)  # Strong, gradual decrease
-                    vel_normalized = current_vel / current_speed
-                    velocity_contribution = vel_normalized * (
-                        current_speed * 0.4 * vel_influence  # Larger velocity contribution
-                    )
-
-                    # Gentle trajectory point with strong velocity preservation
-                    corrected_point = (
-                        current_pos * (1 - correction_factor)
-                        + target_point * correction_factor
-                        + velocity_contribution
-                    )
-
-                    corrected_waypoints.append(corrected_point)
-
-                # Add remaining waypoints
-                corrected_waypoints.extend(new_waypoints[2:] if len(new_waypoints) > 2 else [])
-
-                applied_correction_info = {
-                    "correction_steps": correction_steps,
-                    "trajectory_error": trajectory_error,
-                    "current_speed": current_speed,
-                    "correction_applied": True,
-                }
-                self.logger.log_trajectory_update(applied_correction_info, current_tick)
-            else:
-                # For smaller errors, use very gentle velocity-aware approach
-                vel_continuation_time = 0.6  # Longer continuation time
-                vel_continuation_dist = current_speed * vel_continuation_time
-                vel_continuation_dist = min(vel_continuation_dist, 0.8)  # Higher cap
-
-                if current_speed > 0.3:
-                    vel_normalized = current_vel / current_speed
-                    velocity_point = current_pos + vel_normalized * vel_continuation_dist
-                    corrected_waypoints.append(velocity_point)
-
-                    # Very smooth transition to new trajectory
-                    if len(new_waypoints) > 1:
-                        target_point = new_waypoints[1]
-                        # Conservative blending - favor velocity continuation
-                        transition_point = velocity_point * 0.8 + target_point * 0.2
-                        corrected_waypoints.append(transition_point)
-
-                # Add remaining waypoints
-                corrected_waypoints.extend(new_waypoints[1:])
-
-                gentle_correction_info = {
-                    "vel_continuation_dist": vel_continuation_dist,
-                    "gentle_correction_applied": True,
-                    "trajectory_error": trajectory_error,
-                }
-                self.logger.log_trajectory_update(gentle_correction_info, current_tick)
-
-            new_waypoints = np.array(corrected_waypoints)
-
-        # Generate new trajectory
-        x_des, y_des, z_des = self.generate_trajectory_from_waypoints(
-            new_waypoints,
-            target_gate_idx,
-            use_velocity_aware=True,
-            current_vel=current_vel,
-            tick=current_tick,
-        )
-
-        # GENTLE trajectory blending
-        if old_x_des is not None and len(old_x_des) > current_traj_idx:
-            blend_horizon = min(N * 2 // 3, len(x_des))  # Longer blending window
-
-            for i in range(blend_horizon):
-                old_idx = current_traj_idx + i
-                if old_idx < len(old_x_des) and i < len(x_des):
-                    # Gentle blending - slow, smooth transition
-                    alpha = 1 - np.exp(-2 * i / blend_horizon)  # Slower transition rate
-
-                    x_des[i] = old_x_des[old_idx] * (1 - alpha) + x_des[i] * alpha
-                    y_des[i] = old_y_des[old_idx] * (1 - alpha) + y_des[i] * alpha
-                    z_des[i] = old_z_des[old_idx] * (1 - alpha) + z_des[i] * alpha
-
-            blending_info = {"blend_horizon": blend_horizon, "blending_applied": True}
-            self.logger.log_trajectory_update(blending_info, current_tick)
-
-        final_update_info = {
-            "trajectory_length": len(x_des),
-            "update_tick": current_tick,
-            "update_successful": True,
-        }
-        self.logger.log_trajectory_update(final_update_info, current_tick)
 
         return x_des, y_des, z_des
 
