@@ -26,10 +26,10 @@ from lsy_drone_racing.utils import DataLogger
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-OBSTACLE_RADIUS = 0.1  # Radius of the obstacles in meters -0.15
+OBSTACLE_RADIUS = 0.15  # Radius of the obstacles in meters
 GATE_LENGTH = 0.50  # Length of the gate in meters
-ELLIPSOID_RADIUS = 0.1  # Diameter of the ellipsoid in meters -0.15
-ELLIPSOID_LENGTH = 0.1  # Length of the ellipsoid in meters - 0.7
+ELLIPSOID_RADIUS = 0.15  # Diameter of the ellipsoid in meters
+ELLIPSOID_LENGTH = 0.7  # Length of the ellipsoid in meters
 
 
 def export_quadrotor_ode_model() -> AcadosModel:
@@ -140,7 +140,7 @@ def setup_ocp(
     # Define weight matrices for the cost function
     # Use provided weights or defaults
     if mpc_weights is not None:
-        pos = mpc_weights.get("Q_pos", 7.0)
+        pos = mpc_weights.get("Q_pos", 1.0)
         vel = mpc_weights.get("Q_vel", 0.5)
         rpy = mpc_weights.get("Q_rpy", 0.01)
         f_col = mpc_weights.get("Q_thrust", 0.01)
@@ -148,7 +148,7 @@ def setup_ocp(
         r_param = mpc_weights.get("R", 0.007)
     else:
         # Default values
-        pos = 7.0
+        pos = 1.0
         vel = 0.5
         rpy = 0.01
         f_col = 0.01
@@ -238,7 +238,7 @@ def setup_ocp(
     ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
-    ocp.solver_options.nlp_solver_type = "SQP_RTI"
+    ocp.solver_options.nlp_solver_type = "SQP"  # SQP_RTI
     ocp.solver_options.tol = 1e-5
 
     ocp.solver_options.qp_solver_cond_N = N
@@ -264,7 +264,7 @@ class MPController(Controller):
         self.config = config
 
         # Configuration parameters
-        self.replanning_frequency = 1
+        self.replanning_frequency = 2
         self.last_replanning_tick = 0
 
         # Setup collision avoidance
@@ -279,26 +279,23 @@ class MPController(Controller):
             OBSTACLE_RADIUS,
         )
 
-        # Approach parameters
-        # self.approach_dist = [0.2, 0.3, 0.5, 0.2]
-        self.approach_dist = [0.1, 0.35, 0.2, 0.01]
-        self.exit_dist = [0.9, 0.20, 0.7, 1.2]
-        self.default_approach_dist = 0.1
-        self.default_exit_dist = 0.5
+        # Receding horizon parameters
+        self.horizon_distance = 1.5  # Only replan within 3 meters ahead
+        self.horizon_time = 2.5  # Or 2.5 seconds ahead
+        self.min_horizon_points = 3  # Minimum points to maintain in horizon
 
         # Initialize target gate tracking
         self.current_target_gate_idx = 0
 
-        # Add height offset parameters
-        # self.approach_height_offset = [
-        #     0.01,
-        #     0.1,
-        #     -0.5,
-        #     0.1,
-        # ]  # Height offset for each gate's approach
-        # self.exit_height_offset = [0.1, 0.1, 0.35, 0.1]  # Height offset for each gate's exit
-        self.approach_height_offset = [0.0, 0.0, 0.0, 0.0]  # Height offset for each gate's approach
-        self.exit_height_offset = [0.0, 0.0, 0.0, 0.0]  # Height offset for each gate's exit
+        # Approach parameters for different gates
+        self.approach_dist = [0.2, 0.35, 0.25, 0.01]
+        self.exit_dist = [0.7, 0.35, 0.5, 1.2]
+        self.default_approach_dist = 0.1
+        self.default_exit_dist = 0.5
+
+        # Height offset parameters
+        self.approach_height_offset = [0.01, 0.1, -0.2, 0.1]
+        self.exit_height_offset = [0.1, 0.1, 0.4, 0.1]
         self.default_approach_height_offset = 0.1
         self.default_exit_height_offset = 0.0
 
@@ -316,6 +313,7 @@ class MPController(Controller):
         self.acados_ocp_solver = AcadosOcpSolver(
             ocp, json_file="lsy_example_mpc.json", verbose=True
         )
+
         # Create the actual solver instance
         # self.acados_ocp_solver, self.ocp = create_ocp_solver(self.T_HORIZON, self.N)
 
@@ -335,141 +333,42 @@ class MPController(Controller):
         # Store only the most recent trajectory
         self.current_trajectory = None  # Will store the most recent trajectory
 
-        # Initialize trajectory (use standard generation for initial trajectory)
+        # Data logger
+        self.logger = DataLogger()
+
+        # Initialize trajectory
         self.waypoints = self._generate_waypoints(obs)
-        self._generate_trajectory_from_waypoints(self.waypoints, 0, use_velocity_aware=False)
-        self._trajectory_start_tick = 0
+        self._generate_trajectory_from_waypoints(self.waypoints, 0)
 
     ###########################################
     # 1. TRAJECTORY GENERATION AND MANAGEMENT #
     ###########################################
 
-    def _generate_trajectory_from_waypoints(
-        self, waypoints: np.ndarray, target_gate_idx: int, use_velocity_aware: bool = False
-    ):
-        """Generate trajectory with optional velocity-aware smooth transitions."""
+    def _generate_trajectory_from_waypoints(self, waypoints: np.ndarray, target_gate_idx: int):
+        """Generate a smooth trajectory from waypoints using cubic splines."""
         if len(waypoints) < 2:
             print("Warning: Not enough waypoints to generate trajectory")
             return
 
-        # Only use velocity-aware generation if explicitly requested (for replanning)
-        # if use_velocity_aware:
-        #     # Get current velocity and position for smooth transition
-        #     current_vel = getattr(self, "_current_vel", np.zeros(3))
-        #     current_speed = np.linalg.norm(current_vel)
+        # Convert waypoints to numpy array if it's not already one
+        if not isinstance(waypoints, np.ndarray):
+            waypoints = np.array(waypoints)
 
-        #     print(f"Using velocity-aware trajectory generation: speed={current_speed:.2f}")
+        # Generate cubic spline interpolation
+        ts = np.linspace(0, 1, np.shape(waypoints)[0])
+        cs_x = CubicSpline(ts, waypoints[:, 0], bc_type="natural")
+        cs_y = CubicSpline(ts, waypoints[:, 1], bc_type="natural")
+        cs_z = CubicSpline(ts, waypoints[:, 2], bc_type="natural")
 
-        #     # Create velocity-aware waypoint sequence only if moving fast enough
-        #     if current_speed > 0.3:  # Only if moving with significant speed
-        #         enhanced_waypoints = []
-        #         enhanced_waypoints.append(waypoints[0])
+        # Calculate trajectory duration based on path length
+        total_distance = np.sum(np.linalg.norm(waypoints[1:] - waypoints[:-1], axis=1))
+        avg_speed = 0.8  # m/s
+        duration = max(8, total_distance / avg_speed)  # At least 8 seconds
 
-        #         # Calculate velocity continuation parameters
-        #         vel_continuation_time = 0.5  # Reduced from 0.8
-        #         vel_continuation_dist = current_speed * vel_continuation_time
-        #         vel_continuation_dist = min(vel_continuation_dist, 0.8)  # Reduced cap
-
-        #         # Normalize velocity and create continuation point
-        #         vel_normalized = current_vel / current_speed
-        #         velocity_point = waypoints[0] + vel_normalized * vel_continuation_dist
-
-        #         enhanced_waypoints.append(velocity_point)
-
-        #         # Add one smooth transition point
-        #         if len(waypoints) > 1:
-        #             next_waypoint = waypoints[1]
-        #             # Simple smooth transition
-        #             transition_point = velocity_point * 0.7 + next_waypoint * 0.3
-        #             enhanced_waypoints.append(transition_point)
-
-        #         # Add remaining waypoints (skip second one since we transition to it)
-        #         enhanced_waypoints.extend(waypoints[2:] if len(waypoints) > 2 else [])
-        #         waypoints = np.array(enhanced_waypoints)
-        #         print(
-        #             f"  Enhanced waypoints for smooth transition: {len(enhanced_waypoints)} points"
-        #         )
-
-        # Standard trajectory generation (for initial and velocity-aware)
-        # Calculate distances between waypoints
-        distances = np.zeros(len(waypoints))
-        for i in range(1, len(waypoints)):
-            distances[i] = distances[i - 1] + np.linalg.norm(waypoints[i] - waypoints[i - 1])
-
-        total_distance = distances[-1]
-
-        # Create time parameterization
-        # if use_velocity_aware and hasattr(self, "_current_vel"):
-        #     current_speed = np.linalg.norm(self._current_vel)
-        #     # Start with current speed, transition to cruise speed
-        #     speeds = []
-        #     cruise_speed = 4.0  # Increase from 3.0 to 5.0 m/s
-        #     for i in range(len(waypoints)):
-        #         if i == 0:
-        #             speeds.append(max(0.3, current_speed))
-        #         elif i <= 2:
-        #             # Gradual transition to cruise speed
-        #             alpha = i / 2.0
-        #             speed = current_speed * (1 - alpha) + cruise_speed * alpha
-        #             speeds.append(np.clip(speed, 0.3, 1.5))  # Increase max from 1.2 to 4.0 m/s
-        #         else:
-        #             speeds.append(cruise_speed)
-        # else:
-        # Standard speeds for initial trajectory
-        speeds = [2.5] * len(waypoints)  # Increase from 0.8 to 2.5 m/s
-
-        # Calculate time points
-        time_points = [0.0]
-        for i in range(1, len(waypoints)):
-            segment_distance = np.linalg.norm(waypoints[i] - waypoints[i - 1])
-            avg_speed = (speeds[i - 1] + speeds[i]) / 2
-            segment_time = segment_distance / max(avg_speed, 0.1)
-            time_points.append(time_points[-1] + segment_time)
-
-        total_time = time_points[-1]
-        min_duration = max(14.0, total_time)
-
-        if total_time < min_duration:
-            time_points.append(min_duration)
-            waypoints = np.vstack([waypoints, waypoints[-1]])
-
-        # Normalize time for spline
-        time_normalized = np.array(time_points) / max(time_points[-1], 1.0)
-
-        # Create splines with velocity boundary conditions only for replanning
-        if (
-            use_velocity_aware
-            and hasattr(self, "_current_vel")
-            and np.linalg.norm(self._current_vel) > 0.3
-        ):
-            try:
-                current_vel = self._current_vel
-                bc_type_x = ((1, current_vel[0]), (2, 0))
-                bc_type_y = ((1, current_vel[1]), (2, 0))
-                bc_type_z = ((1, current_vel[2]), (2, 0))
-
-                cs_x = CubicSpline(time_normalized, waypoints[:, 0], bc_type=bc_type_x)
-                cs_y = CubicSpline(time_normalized, waypoints[:, 1], bc_type=bc_type_y)
-                cs_z = CubicSpline(time_normalized, waypoints[:, 2], bc_type=bc_type_z)
-
-                print(f"  Applied velocity boundary conditions: {current_vel}")
-            except Exception as e:
-                print(f"  Velocity boundary conditions failed, using natural: {e}")
-                cs_x = CubicSpline(time_normalized, waypoints[:, 0], bc_type="natural")
-                cs_y = CubicSpline(time_normalized, waypoints[:, 1], bc_type="natural")
-                cs_z = CubicSpline(time_normalized, waypoints[:, 2], bc_type="natural")
-        else:
-            # Use natural splines for initial trajectory
-            cs_x = CubicSpline(time_normalized, waypoints[:, 0], bc_type="natural")
-            cs_y = CubicSpline(time_normalized, waypoints[:, 1], bc_type="natural")
-            cs_z = CubicSpline(time_normalized, waypoints[:, 2], bc_type="natural")
-
-        # Generate trajectory points
-        trajectory_freq = self.freq
-        min_points = max(int(trajectory_freq * min_duration), self._tick + 3 * self.N)
-        min_points = 700
-
-        ts = np.linspace(0, 1, min_points)
+        # Generate trajectory points with sufficient density
+        min_points = max(self.freq * duration, self._tick + 3 * self.N)  # Ensure enough points
+        # ts = np.linspace(0, 1, int(min_points))
+        ts = np.linspace(0, 1, 1000)
         self.x_des = cs_x(ts)
         self.y_des = cs_y(ts)
         self.z_des = cs_z(ts)
@@ -480,7 +379,7 @@ class MPController(Controller):
         self.y_des = np.concatenate((self.y_des, [self.y_des[-1]] * extra_points))
         self.z_des = np.concatenate((self.z_des, [self.z_des[-1]] * extra_points))
 
-        # Save trajectory
+        # Save trajectory for later plotting
         trajectory = {
             "tick": self._tick,
             "waypoints": waypoints.copy(),
@@ -490,11 +389,11 @@ class MPController(Controller):
             "timestamp": time.time() if hasattr(time, "time") else 0,
         }
 
+        # Store only the most recent trajectory
         self.current_trajectory = trajectory
-        self.save_trajectories_to_file(f"flight_logs/{target_gate_idx}_trajectories.npz")
 
-        mode = "velocity-aware" if use_velocity_aware else "standard"
-        print(f"Generated {mode} trajectory: {len(waypoints)} waypoints, {len(self.x_des)} points")
+        # Save trajectory to file
+        self.save_trajectories_to_file(f"flight_logs/{target_gate_idx}_trajectories.npz")
 
     def save_trajectories_to_file(self, filename: str = "trajectories.npz") -> bool:
         """Save the current trajectory to a file for later analysis."""
@@ -596,48 +495,215 @@ class MPController(Controller):
             return False
 
     def _update_trajectory(
-        self, new_waypoints: np.ndarray, obs: dict[str, NDArray[np.floating]] | None = None
+        self,
+        new_waypoints: NDArray[np.floating],
+        obs: dict[str, NDArray[np.floating]] | None = None,
     ):
-        """Update trajectory using standard generation."""
+        """Update trajectory using receding horizon approach."""
         if len(new_waypoints) < 2:
             print("Warning: Not enough waypoints to update trajectory")
             return
 
-        current_tick = self._tick
+        current_pos = obs["pos"] if obs else np.array([0, 0, 0])
 
-        # Generate new trajectory with standard generation
-        self._generate_trajectory_from_waypoints(
-            new_waypoints,
-            obs["target_gate"] if obs and "target_gate" in obs else 0,
-            use_velocity_aware=False,  # Standard generation
-        )
+        # Apply receding horizon planning
+        if hasattr(self, "x_des") and len(self.x_des) > 0:
+            # Only replan within the horizon
+            horizon_waypoints = self._get_horizon_waypoints(current_pos, new_waypoints)
+            self._replan_horizon_trajectory(horizon_waypoints, obs)
+        else:
+            # First trajectory generation - plan full path
+            self._generate_trajectory_from_waypoints(
+                new_waypoints, obs["target_gate"] if obs and "target_gate" in obs else 0
+            )
 
-        self._trajectory_start_tick = current_tick
-        print(f"  Standard trajectory updated at tick {current_tick}, length: {len(self.x_des)}")
+    def _get_horizon_waypoints(
+        self, current_pos: NDArray[np.floating], new_waypoints: NDArray[np.floating]
+    ) -> NDArray[np.floating]:
+        """Extract waypoints within the receding horizon, filtering based on drone-gate proximity."""
+        horizon_waypoints = [current_pos]  # Start with current position
 
-    def _update_trajectory_with_velocity_aware(
-        self, new_waypoints: np.ndarray, obs: dict[str, NDArray[np.floating]] | None = None
+        for waypoint in new_waypoints:
+            distance_to_waypoint = np.linalg.norm(waypoint - current_pos)
+
+            # Check if waypoint is within horizon distance
+            if distance_to_waypoint <= self.horizon_distance:
+                horizon_waypoints.append(waypoint)
+            elif len(horizon_waypoints) >= self.min_horizon_points:
+                # Stop adding waypoints once we have enough in horizon
+                break
+
+        # Ensure we have at least minimum points by adding the next few waypoints
+        remaining_waypoints = new_waypoints[len(horizon_waypoints) - 1 :]
+        needed_points = max(0, self.min_horizon_points - len(horizon_waypoints))
+        if needed_points > 0 and len(remaining_waypoints) > 0:
+            horizon_waypoints.extend(remaining_waypoints[:needed_points])
+
+        return np.array(horizon_waypoints)
+
+    def _should_add_waypoint_based_on_gate_proximity(
+        self, current_pos: NDArray[np.floating], gate_info: dict
+    ) -> bool:
+        """Determine if a waypoint should be added based on drone proximity to gate.
+
+        Args:
+            current_pos: Current drone position
+            waypoint: Candidate waypoint to add
+            gate_info: Information about the current target gate
+
+        Returns:
+            bool: Whether to add this waypoint
+        """
+        gate_center = gate_info["center"]
+        gate_normal = gate_info["normal"]
+
+        # Calculate approach point for this gate - use gate-specific distance
+        approach_dist = self.default_approach_dist
+
+        # Get the correct gate index - this is the key fix
+        # if hasattr(self, 'current_target_gate_idx') and self.current_target_gate_idx is not None:
+        #     gate_idx = self.current_target_gate_idx
+        #     if gate_idx < len(self.approach_dist):
+        #         approach_dist = self.approach_dist[gate_idx]
+
+        approach_point = gate_center + gate_normal * approach_dist
+
+        # Calculate distances
+        drone_to_gate = np.linalg.norm(current_pos - gate_center)
+        approach_to_gate = np.linalg.norm(approach_point - gate_center)
+
+        # Check if drone is closer to gate than the approach point
+        if drone_to_gate < approach_to_gate:
+            print(
+                f"Gate {getattr(self, 'current_target_gate_idx', 'unknown')}: Drone closer to gate ({drone_to_gate:.2f}m) than approach point ({approach_to_gate:.2f}m, dist={approach_dist})"
+            )
+            return False
+        else:
+            # Drone is not yet close to gate, use normal horizon filtering
+            return True
+
+    def _replan_horizon_trajectory(
+        self, horizon_waypoints: NDArray[np.floating], obs: dict[str, NDArray[np.floating]]
     ):
-        """Update trajectory using velocity-aware generation for smooth transitions."""
-        if len(new_waypoints) < 2:
-            print("Warning: Not enough waypoints to update trajectory")
+        """Replan only the trajectory within the receding horizon."""
+        if len(horizon_waypoints) < 2:
             return
 
-        current_tick = self._tick
+        # Store current target gate for proximity checks
+        if "target_gate" in obs:
+            self.current_target_gate_idx = int(obs["target_gate"])
 
-        # Generate new trajectory with velocity-aware smoothing
-        self._generate_trajectory_from_waypoints(
-            new_waypoints,
-            obs["target_gate"] if obs and "target_gate" in obs else 0,
-            use_velocity_aware=True,  # Enable velocity-aware generation for replanning
+        # Find the current position in the existing trajectory
+        current_trajectory_idx = min(self._tick, len(self.x_des) - 1)
+
+        # Calculate how many trajectory points are within the horizon
+        horizon_points = self._calculate_horizon_trajectory_points()
+
+        # Generate new trajectory segment for the horizon
+        horizon_trajectory = self._generate_horizon_trajectory(horizon_waypoints)
+
+        # Splice the new horizon trajectory into the existing trajectory
+        self._splice_horizon_trajectory(
+            horizon_trajectory, current_trajectory_idx, horizon_points, obs
         )
 
-        # Reset trajectory start tick
-        self._trajectory_start_tick = current_tick
-
-        print(
-            f"  Velocity-aware trajectory updated at tick {current_tick}, length: {len(self.x_des)}"
+    def _calculate_horizon_trajectory_points(self) -> int:
+        """Calculate how many trajectory points fall within the receding horizon."""
+        current_pos = (
+            np.array([self.x_des[self._tick], self.y_des[self._tick], self.z_des[self._tick]])
+            if self._tick < len(self.x_des)
+            else np.array([0, 0, 0])
         )
+
+        horizon_points = 0
+        for i in range(self._tick, len(self.x_des)):
+            traj_point = np.array([self.x_des[i], self.y_des[i], self.z_des[i]])
+            if np.linalg.norm(traj_point - current_pos) <= self.horizon_distance:
+                horizon_points += 1
+            else:
+                break
+
+        # Ensure minimum points based on time horizon
+        time_based_points = int(self.horizon_time * self.freq)
+        return max(horizon_points, time_based_points)
+
+    def _generate_horizon_trajectory(self, horizon_waypoints: NDArray[np.floating]) -> dict:
+        """Generate trajectory for the receding horizon only."""
+        if len(horizon_waypoints) < 2:
+            return None
+
+        # Generate splines for horizon waypoints
+        ts = np.linspace(0, 1, len(horizon_waypoints))
+        cs_x = CubicSpline(ts, horizon_waypoints[:, 0], bc_type="natural")
+        cs_y = CubicSpline(ts, horizon_waypoints[:, 1], bc_type="natural")
+        cs_z = CubicSpline(ts, horizon_waypoints[:, 2], bc_type="natural")
+
+        # Calculate trajectory points for horizon
+        horizon_distance = np.sum(
+            np.linalg.norm(horizon_waypoints[1:] - horizon_waypoints[:-1], axis=1)
+        )
+        avg_speed = 0.8
+        horizon_duration = max(self.horizon_time, horizon_distance / avg_speed)
+
+        num_points = int(horizon_duration * self.freq)
+        ts_traj = np.linspace(0, 1, num_points)
+
+        horizon_x = cs_x(ts_traj)
+        horizon_y = cs_y(ts_traj)
+        horizon_z = cs_z(ts_traj)
+
+        return {"x": horizon_x, "y": horizon_y, "z": horizon_z}
+
+    def _splice_horizon_trajectory(
+        self,
+        horizon_trajectory: dict[str, NDArray[np.floating]],
+        current_idx: int,
+        horizon_points: int,
+        obs: dict[str, NDArray[np.floating]] | None,
+    ):
+        """Replace the horizon portion of the existing trajectory."""
+        if horizon_trajectory is None:
+            return
+
+        # Determine splice indices
+        splice_start = current_idx
+        splice_end = min(current_idx + horizon_points, len(self.x_des))
+
+        # Create new trajectory arrays
+        new_x_des = np.concatenate(
+            [
+                self.x_des[:splice_start],  # Keep past trajectory
+                horizon_trajectory["x"],  # New horizon trajectory
+                self.x_des[splice_end:],  # Keep future trajectory beyond horizon
+            ]
+        )
+
+        new_y_des = np.concatenate(
+            [self.y_des[:splice_start], horizon_trajectory["y"], self.y_des[splice_end:]]
+        )
+
+        new_z_des = np.concatenate(
+            [self.z_des[:splice_start], horizon_trajectory["z"], self.z_des[splice_end:]]
+        )
+
+        # Update trajectory
+        self.x_des = new_x_des
+        self.y_des = new_y_des
+        self.z_des = new_z_des
+
+        # Save updated trajectory
+        target_gate_idx = obs["target_gate"] if obs and "target_gate" in obs else 0
+        trajectory = {
+            "tick": self._tick,
+            "waypoints": horizon_trajectory,  # Store only the replanned portion
+            "x": self.x_des.copy(),
+            "y": self.y_des.copy(),
+            "z": self.z_des.copy(),
+            "timestamp": time.time() if hasattr(time, "time") else 0,
+        }
+
+        self.current_trajectory = trajectory
+        self.save_trajectories_to_file(f"flight_logs/{target_gate_idx}_horizon_trajectories.npz")
 
     ##############################
     # 2. WAYPOINT GENERATION     #
@@ -646,6 +712,7 @@ class MPController(Controller):
     def loop_path_gen(self, gates: list[dict], obs: dict[str, NDArray[np.floating]]) -> np.ndarray:
         """Generate a loop path through all gates with corridor constraints and height offsets."""
         waypoints = []
+        current_pos = obs["pos"] if obs else np.array([0, 0, 0])
 
         # Create waypoints for each gate
         for gate_idx, gate in enumerate(gates):
@@ -684,19 +751,59 @@ class MPController(Controller):
             exit_point = gate_info["center"] - gate_info["normal"] * exit_dist
             exit_point[2] += exit_z_offset  # Add height offset
 
-            # Add approach point with height offset
-            waypoints.append(approach_point)
+            # Use proximity function to check if approach point should be added
+            # If drone is already close to gate, skip approach point
+            if self._should_add_waypoint_based_on_gate_proximity(current_pos, gate_info):
+                waypoints.append(approach_point)
 
             # Always add gate center point
             waypoints.append(gate_info["center"])
 
-            # Add exit point with height offset
+            # Add exit point
             waypoints.append(exit_point)
 
-            if self.current_target_gate_idx == 2:
-                approach_point = gate_info["center"] + gate_info["normal"] * approach_dist
-                approach_point[2] += 0.35
-                waypoints.append(approach_point)
+            # Add corridor waypoints to next gate if available
+            if gate_idx < len(gates) - 1:
+                next_gate = gates[gate_idx + 1]
+                next_gate_info = self._get_gate_info(next_gate)
+
+                # Get the approach point of the next gate with height offset
+                next_approach_dist = (
+                    self.approach_dist[original_gate_idx + 1]
+                    if original_gate_idx + 1 < len(self.approach_dist)
+                    else self.default_approach_dist
+                )
+                next_approach_z_offset = (
+                    self.approach_height_offset[original_gate_idx + 1]
+                    if original_gate_idx + 1 < len(self.approach_height_offset)
+                    else self.default_approach_height_offset
+                )
+
+                next_approach = (
+                    next_gate_info["center"] + next_gate_info["normal"] * next_approach_dist
+                )
+                next_approach[2] += next_approach_z_offset  # Add height offset
+
+                # Add corridor points between current exit and next approach (prevents shortcuts)
+                num_corridor_points = 2  # Number of points in the corridor
+                for i in range(1, num_corridor_points):
+                    t = i / num_corridor_points
+                    corridor_point = exit_point * (1 - t) + next_approach * t
+
+                    # Optional: Add small random offset perpendicular to corridor to smooth path
+                    if i > 1 and i < num_corridor_points - 1:
+                        # Calculate corridor direction
+                        corridor_dir = next_approach - exit_point
+                        corridor_dir = corridor_dir / np.linalg.norm(corridor_dir)
+
+                        # Create perpendicular vector for slight variation
+                        perp = np.array([-corridor_dir[1], corridor_dir[0], 0]) * 0.05
+
+                        # Add small random offset perpendicular to path
+                        offset = perp * np.sin(i * np.pi / num_corridor_points) * 0.1
+                        corridor_point += offset
+
+                    waypoints.append(corridor_point)
 
         print(f"Generated {len(waypoints)} waypoints with proximity-based filtering")
         return np.array(waypoints)
@@ -839,10 +946,6 @@ class MPController(Controller):
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
         """Execute MPC control with receding horizon replanning."""
-
-        # Store current velocity for smooth trajectory transitions
-        self._current_vel = obs["vel"].copy()
-
         # Check for replanning based on gate observations
         if self._tick - self.last_replanning_tick >= self.replanning_frequency:
             self.last_replanning_tick = self._tick
@@ -862,42 +965,19 @@ class MPController(Controller):
                     config_pos = np.array(self.config.env.track["gates"][target_gate_idx]["pos"])
                     observed_pos = np.array(obs["gates_pos"][target_gate_idx])
 
-                    # Check only horizontal distance (x and y coordinates)
-                    horizontal_config = config_pos[:2]  # x, y only
-                    horizontal_observed = observed_pos[:2]  # x, y only
-                    horizontal_diff = np.linalg.norm(horizontal_config - horizontal_observed)
-
-                    if horizontal_diff > 0.10:  # 10cm horizontal threshold
-                        print(
-                            f"Gate {target_gate_idx} horizontal position updated, replanning trajectory"
-                        )
-                        print(
-                            f"  Current velocity: {self._current_vel} (speed: {np.linalg.norm(self._current_vel):.2f} m/s)"
-                        )
-
+                    if np.linalg.norm(config_pos - observed_pos) > 0.13:
+                        print(f"Gate {target_gate_idx} position updated, horizon replanning")
                         should_replan = True
                         self.updated_gates.add(target_gate_idx)
 
                 if should_replan:
-                    # Generate NEW waypoints with the updated gate position
+                    # Generate waypoints for the updated gate
                     new_waypoints = self._generate_waypoints(obs, target_gate_idx)
-                    print(f"Generated new waypoints: {new_waypoints[-6:]}")
+                    self._update_trajectory(new_waypoints, obs)
 
-                    # Update trajectory with velocity-aware generation for smooth transition
-                    self._update_trajectory_with_velocity_aware(new_waypoints, obs)
-
-                    current_idx = min(self._tick, len(self.x_des) - 1)
-                    if current_idx < len(self.x_des):
-                        print(
-                            f"  New trajectory points around tick {self._tick}: x={self.x_des[current_idx]:.3f}, y={self.y_des[current_idx]:.3f}, z={self.z_des[current_idx]:.3f}"
-                        )
-
-        # Execute MPC control with trajectory offset
-        trajectory_offset = getattr(self, "_trajectory_start_tick", 0)
-        trajectory_index = max(0, self._tick - trajectory_offset)
-
-        i = min(trajectory_index, len(self.x_des) - 1)
-        if trajectory_index >= len(self.x_des):
+        # Execute MPC control
+        i = min(self._tick, len(self.x_des) - 1)
+        if self._tick > i:
             self.finished = True
 
         # Get current state and setup
@@ -924,43 +1004,42 @@ class MPController(Controller):
 
         # Set reference trajectory
         for j in range(self.N):
-            idx = i + j
-            if idx < traj_len:
-                x_ref = self.x_des[idx]
-                y_ref = self.y_des[idx]
-                z_ref = self.z_des[idx]
+            # Get reference point from trajectory
+            if i + j < traj_len:
+                x_ref = self.x_des[i + j]
+                y_ref = self.y_des[i + j]
+                z_ref = self.z_des[i + j]
             else:
                 x_ref = self.x_des[-1]
                 y_ref = self.y_des[-1]
                 z_ref = self.z_des[-1]
 
-            # Base reference (18 dimensions: 14 states + 4 controls)
+            # Set reference for this step
             yref = np.array(
                 [
                     x_ref,
                     y_ref,
-                    z_ref,  # Position (3)
+                    z_ref,
                     0.0,
                     0.0,
-                    0.0,  # Velocity (3)
                     0.0,
                     0.0,
-                    0.0,  # RPY (3)
+                    0.0,
+                    0.0,
                     0.35,
-                    0.35,  # f_collective, f_collective_cmd (2)
-                    0.0,
-                    0.0,
-                    0.0,  # rpy_cmd (3)
+                    0.35,
                     0.0,
                     0.0,
                     0.0,
-                    0.0,  # Control inputs (4)
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
                 ]
             )
-
             self.acados_ocp_solver.set(j, "yref", yref)
 
-        # Terminal cost (14 dimensions: states only)
+        # Set terminal reference
         terminal_idx = min(i + self.N, traj_len - 1)
         yref_N = np.array(
             [
@@ -989,7 +1068,6 @@ class MPController(Controller):
         # Solve MPC and get control
         self.acados_ocp_solver.solve()
         x1 = self.acados_ocp_solver.get(1, "x")
-        u0 = self.acados_ocp_solver.get(0, "u")  # Get control vector (4 elements)
 
         # Smooth control updates
         w = 1 / self.config.env.freq / self.dt
@@ -997,8 +1075,8 @@ class MPController(Controller):
         self.last_f_cmd = x1[10]
         self.last_rpy_cmd = x1[11:14]
 
-        # Return the real control commands
-        cmd = x1[10:14]  # Use the state-based commands as before
+        # Return thrust and attitude commands
+        cmd = x1[10:14]
         return cmd
 
     def step_callback(
@@ -1012,6 +1090,7 @@ class MPController(Controller):
     ) -> bool:
         """Increment the tick counter."""
         self._tick += 1
+        self.logger.log_step(obs, action, reward, terminated, truncated, info)
         return self.finished
 
     def episode_callback(self):
@@ -1019,7 +1098,7 @@ class MPController(Controller):
         self._tick = 0
         self.finished = False
         self.updated_gates = set()
-        self._trajectory_start_tick = 0  # Reset trajectory tracking
+        self.logger.store_episode()
 
     def get_predicted_trajectory(self) -> np.ndarray:
         """Return the MPC's predicted trajectory over the horizon."""
@@ -1027,18 +1106,7 @@ class MPController(Controller):
         for i in range(self.N):
             x = self.acados_ocp_solver.get(i, "x")
             pred_traj.append(x[:3])
-        if self.current_trajectory is not None:
-            full_trajectory = np.column_stack(
-                [
-                    self.current_trajectory["x"][:1000],
-                    self.current_trajectory["y"][:1000],
-                    self.current_trajectory["z"][:1000],
-                ]
-            )
-        else:
-            full_trajectory = np.array([])
-
-        return np.array(pred_traj), full_trajectory
+        return np.array(pred_traj)
 
     def draw(self, env):
         self.collision_avoidance_handler.draw_collision_bodies(env, self.obs)
