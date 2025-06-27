@@ -40,24 +40,6 @@ class TrajectoryPlanner:
         self.drone_timestamps = []
         self.drone_ticks = []
 
-    def log_drone_position(self, obs: dict, tick: int):
-        """Log the current drone position."""
-        if "pos" in obs:
-            drone_pos = obs["pos"]
-            self.drone_positions.append(drone_pos.copy())
-            self.drone_timestamps.append(time.time())
-            self.drone_ticks.append(tick)
-
-            # Log position info occasionally
-            if tick % 50 == 0:  # Every 50 ticks
-                position_info = {
-                    "x": float(drone_pos[0]),
-                    "y": float(drone_pos[1]),
-                    "z": float(drone_pos[2]),
-                    "tick": tick,
-                }
-                self.logger.log_drone_position(position_info, tick)
-
     def generate_trajectory_from_waypoints(
         self,
         waypoints: np.ndarray,
@@ -74,7 +56,7 @@ class TrajectoryPlanner:
             return np.array([]), np.array([]), np.array([])
 
         # Use uniform speeds
-        speeds = [1.3] * len(waypoints)  # 1.2
+        speeds = [1.6] * len(waypoints)  # 1.3
 
         # speeds = self.calculate_adaptive_speeds(waypoints, target_gate_idx)
 
@@ -161,11 +143,11 @@ class TrajectoryPlanner:
         current_tick: int,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Blend new trajectory with previous one while preserving velocity magnitudes."""
-        blend_horizon = 5  # Only 0.1 seconds at 50Hz instead of 0.6 seconds
+        blend_horizon = 5  # Only 0.1 seconds at 50Hz
 
         # Skip blending if moving too fast
         current_speed = np.linalg.norm(current_vel) if current_vel is not None else 0
-        if current_speed > 1.0:
+        if current_speed > 3.0:
             return new_x, new_y, new_z
 
         # Extract relevant portion of previous trajectory
@@ -270,7 +252,6 @@ class TrajectoryPlanner:
             # Always add gate center point
             gate_point = gate_info["center"].copy()
             # gate_point[2] += 0.2  # Ensure height offset is applied
-            gate_point[2] += 0.0  # Ensure height offset is applied
             waypoints.append(gate_point)
 
             # Add exit point with height offset
@@ -425,9 +406,6 @@ class TrajectoryPlanner:
             temp_normal = rotation.apply([1.0, 0.0, 0.0])
             gate_info["normal"] = np.array([temp_normal[1], -temp_normal[0], temp_normal[2]])
             if distance_moved > 0.1:
-                print(
-                    f"optimal point {self._calculate_optimal_gate_crossing(original_pos, observed_pos_array)}"
-                )
                 gate_info["pos"] = self._calculate_optimal_gate_crossing(
                     original_pos, observed_pos_array
                 )
@@ -446,7 +424,7 @@ class TrajectoryPlanner:
         Minimizes adjustment while ensuring safe passage.
         """
         # Define drone safety clearance
-        drone_clearance_horizontal = 0.2  # 15cm clearance needed
+        drone_clearance_horizontal = 0.2  # cm clearance needed
         gate_half_width = 0.25  # Gate margin is 25cm from center
 
         # Vector from original to new gate center
@@ -650,7 +628,7 @@ class TrajectoryPlanner:
             else:
                 approach_z_offset = self.default_approach_height_offset
 
-            # Calculate proper approach point using OBSERVED gate position
+            # Calculate proper approach point using observed gate position
             proper_approach_point = gate_info["center"] + gate_info["normal"] * approach_dist
             proper_approach_point[2] += approach_z_offset
 
@@ -702,7 +680,7 @@ class TrajectoryPlanner:
             else:
                 exit_z_offset = self.default_exit_height_offset
 
-            # Calculate approach point using OBSERVED gate position
+            # Calculate approach point using observed gate position
             configured_approach = gate_info["center"] + gate_info["normal"] * approach_dist
             configured_approach[2] += approach_z_offset
 
@@ -735,7 +713,7 @@ class TrajectoryPlanner:
                         )
                         waypoints.append(intermediate_point)
 
-            # Add the main gate waypoints using OBSERVED positions
+            # Add the main gate waypoints using observed positions
             waypoints.append(approach_point)
 
             gate_point = gate_info["center"].copy()
@@ -847,23 +825,11 @@ class TrajectoryPlanner:
             if progress < 0:
                 # Approach point is behind, calculate forward alternative
 
-                # Option 1: Side approach - approach from the side
+                # Side approach - approach from the side
                 lateral_offset = self._calculate_lateral_approach(
                     current_pos, current_vel, gate_info, approach_distance
                 )
-
-                # Option 2: Curved approach - wide arc to approach from front
-                curved_approach = self._calculate_curved_approach(
-                    current_pos, current_vel, gate_info, approach_distance
-                )
-
-                # Choose based on distance and safety
-                if np.linalg.norm(lateral_offset - current_pos) < np.linalg.norm(
-                    curved_approach - current_pos
-                ):
-                    return lateral_offset
-                else:
-                    return curved_approach
+                return lateral_offset
 
         return standard_approach
 
@@ -893,38 +859,6 @@ class TrajectoryPlanner:
         )
 
         return lateral_point
-
-    def _calculate_curved_approach(
-        self,
-        current_pos: np.ndarray,
-        current_vel: np.ndarray,
-        gate_info: dict,
-        approach_distance: float,
-    ) -> np.ndarray:
-        """Calculate a curved approach that loops around to approach from front."""
-        gate_center = gate_info["center"]
-        gate_normal = gate_info["normal"]
-
-        # Create a wide arc that brings drone to front of gate
-        arc_radius = 0.2  # 20cm radius
-
-        # Find center of arc
-        to_gate = gate_center - current_pos
-        to_gate_norm = np.linalg.norm(to_gate)
-        if to_gate_norm > 1e-8:
-            to_gate_normalized = to_gate / to_gate_norm
-
-            # Arc center is perpendicular to line between drone and gate
-            perpendicular = np.array([-to_gate_normalized[1], to_gate_normalized[0], 0])
-            _ = current_pos + perpendicular * arc_radius
-
-            # Point on arc that's in front of gate using configured approach distance
-            front_approach = gate_center + gate_normal * approach_distance
-        else:
-            # Drone is at gate center, use standard approach with configured distance
-            front_approach = gate_center + gate_normal * approach_distance
-
-        return front_approach
 
     def calculate_adaptive_speeds(
         self, waypoints: np.ndarray, current_target_gate: int

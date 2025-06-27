@@ -31,7 +31,7 @@ class MPController(Controller):
         """Initialize the attitude controller."""
         super().__init__(obs, info, config)
 
-        # Setup enhanced logging with no console output
+        # Setup logging
         self.flight_logger = FlightLogger("MPController")
 
         # Basic configuration
@@ -58,8 +58,6 @@ class MPController(Controller):
         # Height offset parameters
         self.approach_height_offset = [0.01, 0.1, -0.1, 0.0]
         self.exit_height_offset = [0.1, 0.1, 0.1, 0.0]
-        # self.approach_height_offset = [0.21, 0.3, 0.1, 0.0]
-        # self.exit_height_offset = [0.3, 0.3, 0.2, 0.0]
         self.default_approach_height_offset = 0.1
         self.default_exit_height_offset = 0.0
 
@@ -109,15 +107,14 @@ class MPController(Controller):
         self.replanning_mpc_weights = self.mpc_weights.copy()
         self.replanning_mpc_weights["Q_pos"] *= 3.0  #  position tracking
         self.replanning_mpc_weights["Q_vel"] *= 1.0  # velocity tracking
-        self.replanning_mpc_weights["R"] *= 1.0  # control penalty slightly
+        self.replanning_mpc_weights["R"] *= 1.0  # control penalty
 
         # Weight adjustment tracking
         self.weights_adjusted = False
         self.weight_adjustment_start_tick = 0
-        self.weight_adjustment_duration = int(2.0 * config.env.freq)
-        self.weight_transition_duration = int(0.0 * config.env.freq)
+        self.weight_adjustment_duration = int(0.7 * config.env.freq)
 
-        # Store parameters directly in the trajectory planner if needed
+        # Store parameters directly in the trajectory planner
         self.trajectory_planner.freq = self.freq
         self.trajectory_planner.approach_dist = self.approach_dist
         self.trajectory_planner.exit_dist = self.exit_dist
@@ -178,9 +175,6 @@ class MPController(Controller):
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
         """Execute MPC control with replanning capabilities."""
-        # Log drone position
-        self.trajectory_planner.log_drone_position(obs, self._tick)
-
         # Store current velocity for smooth trajectory transitions
         self._current_vel = obs["vel"].copy()
 
@@ -204,8 +198,8 @@ class MPController(Controller):
                 self.gates_passed, self.total_gates, current_target_gate, self._tick
             )
 
-        # UPDATE WEIGHTS GRADUALLY
-        self._update_weights_gradually()
+        # UPDATE WEIGHTS
+        self._update_weights()
 
         # Check for replanning
         just_replanned = self._check_and_execute_replanning(obs, current_target_gate)
@@ -227,7 +221,7 @@ class MPController(Controller):
         if self._tick - self.last_replanning_tick >= self.replanning_frequency:
             self.last_replanning_tick = self._tick
 
-            # Check if we have new gate observations to update trajectory
+            # Chek if variables are initialized
             if "gates_pos" in obs and obs["gates_pos"] is not None and "target_gate" in obs:
                 # Check if the target gate hasn't been updated yet
                 if (
@@ -601,96 +595,68 @@ class MPController(Controller):
 
     def _activate_replanning_weights_gradual(self):
         """Activate higher path following weights with gradual transition."""
-        self.weights_adjusted = True
-        self.weight_adjustment_start_tick = self._tick
+        if not self.weights_adjusted:
+            self.weights_adjusted = True
+            self.weight_adjustment_start_tick = self._tick
 
-    def _update_weights_gradually(self):
+    def _update_weights(self):
         """Gradually transition between weight sets."""
+        weights_changed = False
+
         if self.weights_adjusted:
             ticks_since_start = self._tick - self.weight_adjustment_start_tick
-
-            if ticks_since_start < self.weight_transition_duration:
-                # Gradual transition to replanning weights
-                alpha = ticks_since_start / self.weight_transition_duration
-                self.mpc_weights["Q_pos"] = (
-                    self.original_mpc_weights["Q_pos"] * (1 - alpha)
-                    + self.replanning_mpc_weights["Q_pos"] * alpha
-                )
-                self.mpc_weights["Q_vel"] = (
-                    self.original_mpc_weights["Q_vel"] * (1 - alpha)
-                    + self.replanning_mpc_weights["Q_vel"] * alpha
-                )
-
-            elif (
-                ticks_since_start
-                < self.weight_adjustment_duration - self.weight_transition_duration
-            ):
+            if ticks_since_start < self.weight_adjustment_duration:
                 # Full replanning weights active
                 self.mpc_weights = self.replanning_mpc_weights.copy()
-
-            elif ticks_since_start < self.weight_adjustment_duration:
-                # Gradual transition back to original weights
-                transition_progress = (
-                    ticks_since_start
-                    - (self.weight_adjustment_duration - self.weight_transition_duration)
-                ) / self.weight_transition_duration
-                alpha = 1 - transition_progress  # Reverse transition
-
-                self.mpc_weights["Q_pos"] = (
-                    self.original_mpc_weights["Q_pos"] * (1 - alpha)
-                    + self.replanning_mpc_weights["Q_pos"] * alpha
-                )
-
             else:
                 # Restore original weights
                 self.mpc_weights = self.original_mpc_weights.copy()
                 self.weights_adjusted = False
 
-        try:
-            # Create Q matrix (14x14) for states
-            Q = np.diag(
-                [
-                    self.mpc_weights["Q_pos"],
-                    self.mpc_weights["Q_pos"],
-                    self.mpc_weights["Q_pos"],  # Position
-                    self.mpc_weights["Q_vel"],
-                    self.mpc_weights["Q_vel"],
-                    self.mpc_weights["Q_vel"],  # Velocity
-                    self.mpc_weights["Q_rpy"],
-                    self.mpc_weights["Q_rpy"],
-                    self.mpc_weights["Q_rpy"],  # RPY
-                    self.mpc_weights["Q_thrust"],
-                    self.mpc_weights["Q_cmd"],  # f_collective, f_cmd
-                    self.mpc_weights["Q_cmd"],
-                    self.mpc_weights["Q_cmd"],
-                    self.mpc_weights["Q_cmd"],  # rpy_cmd
-                ]
-            )
+            weights_changed = True
 
-            # Create R matrix (4x4) for controls
-            R = np.diag(
-                [
-                    self.mpc_weights["R"],
-                    self.mpc_weights["R"],
-                    self.mpc_weights["R"],
-                    self.mpc_weights["R"],
-                ]
-            )
+        if weights_changed:
+            try:
+                # Create Q matrix (14x14) for states
+                Q = np.diag(
+                    [
+                        self.mpc_weights["Q_pos"],
+                        self.mpc_weights["Q_pos"],
+                        self.mpc_weights["Q_pos"],  # Position
+                        self.mpc_weights["Q_vel"],
+                        self.mpc_weights["Q_vel"],
+                        self.mpc_weights["Q_vel"],  # Velocity
+                        self.mpc_weights["Q_rpy"],
+                        self.mpc_weights["Q_rpy"],
+                        self.mpc_weights["Q_rpy"],  # RPY
+                        self.mpc_weights["Q_thrust"],
+                        self.mpc_weights["Q_cmd"],  # f_collective, f_cmd
+                        self.mpc_weights["Q_cmd"],
+                        self.mpc_weights["Q_cmd"],
+                        self.mpc_weights["Q_cmd"],  # rpy_cmd
+                    ]
+                )
 
-            # Create the full 18x18 cost matrix using block_diag (same as original)
-            W = scipy.linalg.block_diag(Q, R)
+                # Create R matrix (4x4) for controls
+                R = np.diag(
+                    [
+                        self.mpc_weights["R"],
+                        self.mpc_weights["R"],
+                        self.mpc_weights["R"],
+                        self.mpc_weights["R"],
+                    ]
+                )
 
-            # Update all stages
-            for i in range(self.N):
-                self.acados_ocp_solver.cost_set(i, "W", W)
+                # Create the full 18x18 cost matrix using block_diag
+                W = scipy.linalg.block_diag(Q, R)
 
-            # Update terminal cost (only states, 14x14)
-            self.acados_ocp_solver.cost_set(self.N, "W", Q)
+                # Update all stages
+                for i in range(self.N):
+                    self.acados_ocp_solver.cost_set(i, "W", W)
 
-            # VERIFICATION: Read back the cost matrix from the solver
-            if (
-                self.weights_adjusted and self._tick % 50 == 0
-            ):  # Check every 10 ticks during adjustment
+                # Update terminal cost (only states, 14x14)
+                self.acados_ocp_solver.cost_set(self.N, "W", Q)
+
                 try:
                     # Read back the cost matrix from stage 0
                     W_readback = self.acados_ocp_solver.cost_get(0, "W")
@@ -700,14 +666,16 @@ class MPController(Controller):
                     vel_match = abs(W_readback[3, 3] - self.mpc_weights["Q_vel"]) < 1e-6
                     r_match = abs(W_readback[14, 14] - self.mpc_weights["R"]) < 1e-6
 
-                    if pos_match and vel_match and r_match:
-                        print("----WEIGHTS SUCCESSFULLY UPDATED IN SOLVER")
-                    else:
-                        print("----WEIGHTS MISMATCH IN SOLVER!")
+                    # if pos_match and vel_match and r_match:
+                    #     print(
+                    #         f"----WEIGHTS SUCCESSFULLY UPDATED IN SOLVER, pos weight: {W_readback[0, 0]}"
+                    #     )
+                    # else:
+                    #     print("----WEIGHTS MISMATCH IN SOLVER!")
 
                 except Exception as verify_e:
                     print(f"---Could not verify weights: {verify_e}")
 
-        except Exception as e:
-            print(f"----Failed to update OCP weights: {e}")
-            pass
+            except Exception as e:
+                print(f"----Failed to update OCP weights: {e}")
+                pass
