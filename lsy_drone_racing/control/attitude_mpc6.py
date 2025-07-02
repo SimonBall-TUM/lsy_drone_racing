@@ -56,8 +56,8 @@ class MPController(Controller):
         self.default_exit_dist = 0.5
 
         # Height offset parameters
-        self.approach_height_offset = [0.01, 0.1, -0.1, 0.0]
-        self.exit_height_offset = [0.1, 0.1, 0.1, 0.0]
+        self.approach_height_offset = [0.01, 0.01, -0.1, 0.0]
+        self.exit_height_offset = [0.1, 0.01, 0.1, 0.0]
         self.default_approach_height_offset = 0.1
         self.default_exit_height_offset = 0.0
 
@@ -105,9 +105,7 @@ class MPController(Controller):
 
         # Define replanning weights (higher path following)
         self.replanning_mpc_weights = self.mpc_weights.copy()
-        self.replanning_mpc_weights["Q_pos"] *= 3.0  #  position tracking
-        self.replanning_mpc_weights["Q_vel"] *= 1.0  # velocity tracking
-        self.replanning_mpc_weights["R"] *= 1.0  # control penalty
+        self.replanning_mpc_weights["Q_pos"] *= 2.0  #  position tracking
 
         # Weight adjustment tracking
         self.weights_adjusted = False
@@ -246,15 +244,6 @@ class MPController(Controller):
                         should_replan = True
                         just_replanned = True
                         self.updated_gates.add(current_target_gate)
-            # if (
-            #     current_target_gate < len(self.config.env.track["gates"])
-            #     and np.linalg.norm(obs["pos"] - np.array(obs["gates_pos"][current_target_gate]))
-            #     < 1.0
-            #     and current_target_gate not in self.updated_speeds
-            # ):
-            #     should_replan = True
-            #     just_replanned = True
-            #     self.updated_speeds.add(current_target_gate)
 
             if should_replan:
                 self._activate_replanning_weights_gradual()
