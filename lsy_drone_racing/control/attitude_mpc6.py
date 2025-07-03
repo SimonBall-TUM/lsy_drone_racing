@@ -18,7 +18,10 @@ from scipy.spatial.transform import Rotation as R
 from lsy_drone_racing.control import Controller
 from lsy_drone_racing.control.acados_model import create_ocp_solver
 from lsy_drone_racing.control.logging_setup import FlightLogger
+
 from lsy_drone_racing.control.smooth_trajectory_planner import TrajectoryPlanner
+# from lsy_drone_racing.control.trajectory_planner import TrajectoryPlanner
+
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -50,14 +53,14 @@ class MPController(Controller):
         self.last_replanning_tick = 0
 
         # Approach parameters for different gates
-        self.approach_dist = [0.2, 0.3, 0.3, 0.1]
-        self.exit_dist = [0.5, 0.15, 0.35, 5.0]
+        self.approach_dist = [0.2, 0.2, 0.2, 0.1]
+        self.exit_dist = [0.3, 0.15, 0.3, 5.0]  # 0.5, 0.15, 0.3, 5.0
         self.default_approach_dist = 0.1
         self.default_exit_dist = 0.5
 
         # Height offset parameters
-        self.approach_height_offset = [0.01, 0.01, -0.1, 0.0]
-        self.exit_height_offset = [0.1, 0.01, 0.1, 0.0]
+        self.approach_height_offset = [0.01, 0.1, -0.05, 0.0]
+        self.exit_height_offset = [0.1, 0.0, 0.1, 0.0]
         self.default_approach_height_offset = 0.1
         self.default_exit_height_offset = 0.0
 
@@ -230,7 +233,7 @@ class MPController(Controller):
                     # Check distance gate has moved
                     diff = np.linalg.norm(config_pos - observed_pos)
 
-                    if diff > 0.05 and self._is_drone_approaching_gate(
+                    if diff > 0.02 and self._is_drone_approaching_gate(
                         obs, current_target_gate
                     ):  # cm threshold and drone is approaching the gate
                         replan_info = {
