@@ -36,9 +36,6 @@ test = ["pytest>=8.0.0", "pyinstrument"]
 online_submission = ["pandas", "kaggle"]
 gpu = ["crazyflow[gpu]"]
 deploy = ["cflib"]
-mpc = [
-    "git+https://github.com/acados/acados.git#subdirectory=interfaces/acados_template",
-]
 
 [tool.setuptools.packages]
 find = {}
