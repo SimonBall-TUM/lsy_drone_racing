@@ -9,7 +9,7 @@ from lsy_drone_racing.utils import load_config, load_controller
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("controller_file", ["trajectory_controller.py"])
+@pytest.mark.parametrize("controller_file", ["attitude_mpc_combined.py"])
 def test_controllers(controller_file: str):
     config = load_config(Path(__file__).parents[2] / "config/level0.toml")
     config.sim.gui = False
@@ -47,7 +47,7 @@ def test_attitude_controller(physics: str):
     config.sim.gui = False
     config.sim.physics = physics
     ctrl_cls = load_controller(
-        Path(__file__).parents[2] / "lsy_drone_racing/control/attitude_controller.py"
+        Path(__file__).parents[2] / "lsy_drone_racing/control/attitude_mpc_combined.py"
     )
     env = gymnasium.make(
         "DroneRacing-v0",
@@ -75,8 +75,8 @@ def test_attitude_controller(physics: str):
 @pytest.mark.integration
 @pytest.mark.parametrize("yaw", [0, np.pi / 2, np.pi, 3 * np.pi / 2])
 @pytest.mark.parametrize("physics", ["analytical"])
-def test_trajectory_controller_finish(yaw: float, physics: str):
-    """Test if the trajectory controller can finish the track.
+def test_attitude_controller_finish(yaw: float, physics: str):
+    """Test if the attitude controller can finish the track.
 
     To catch bugs that only occur with orientations other than the unit quaternion, we test if the
     controller can finish the track with different desired yaws.
@@ -87,7 +87,7 @@ def test_trajectory_controller_finish(yaw: float, physics: str):
     config.sim.physics = physics
     config.sim.gui = False
     ctrl_cls = load_controller(
-        Path(__file__).parents[2] / "lsy_drone_racing/control/trajectory_controller.py"
+        Path(__file__).parents[2] / "lsy_drone_racing/control/attitude_mpc_combined.py"
     )
     env = gymnasium.make(
         "DroneRacing-v0",
