@@ -23,7 +23,7 @@ class ControllerConfig:
         """
         self.config_file = config_file
         # Look for the config file in the config directory (two levels up from utils)
-        self.config_path = Path(__file__).parent.parent.parent / "config" / config_file
+        self.config_path = Path(__file__).parent.parent / "control" / "data" / config_file
         self._constants = self._load_constants()
 
     def _load_constants(self) -> Dict[str, Any]:
