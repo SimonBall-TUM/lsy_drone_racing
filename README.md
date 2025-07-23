@@ -241,3 +241,6 @@ The trajectory planner implements racing line techniques:
 6. **MPC Optimization**: Solve for optimal control inputs over prediction horizon
 7. **Control Output**: Return attitude commands [thrust, roll, pitch, yaw]
 8. **Logging**: Record performance metrics and flight data
+
+## Further Information
+For further information click [here](README_LSY_md).
