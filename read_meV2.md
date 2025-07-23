@@ -63,7 +63,7 @@ The main controller class that orchestrates all components:
 **Key Functions:**
 - `__init__()`: Initializes MPC solver, trajectory planner, collision avoidance, and logging systems
 - `compute_control()`: Main control loop that executes MPC optimization with adaptive replanning
-- `_check_and_execute_replanning()`: Detects gate movements above threshold (0.05m) and triggers smooth replanning
+- `_check_and_execute_replanning()`: Detects gate movements above threshold (0.02m) and triggers smooth replanning
 - `_execute_mpc_control()`: Solves MPC optimization problem and returns attitude commands
 - `_update_weights()`: Dynamically adjusts MPC cost weights during replanning phases
 - `step_callback()`: Updates controller state and logs performance metrics after each control step
@@ -108,8 +108,8 @@ Comprehensive logging system for analysis and debugging:
 # Core MPC settings
 N = 60                    # Prediction horizon steps
 T_HORIZON = 2.0          # Prediction horizon time (seconds)
-freq = 240               # Control frequency (Hz)
-replanning_frequency = 10 # Replanning check frequency (ticks)
+freq = 500               # Control frequency (Hz)
+replanning_frequency = 1 # Replanning check frequency (ticks)
 
 # Cost function weights (tunable for performance)
 mpc_weights = {
@@ -138,28 +138,28 @@ replanning_weights = {
 approach_dist = [0.2, 0.3, 0.2, 0.1]     # Distance before gate center
 
 # Individual gate exit distances (meters)  
-exit_dist = [0.4, 0.15, 0.2, 5.0]        # Distance after gate center
+exit_dist = [0.4, 0.15, 0.25, 5.0]        # Distance after gate center
 
 # Height offsets for approach points (meters)
 approach_height_offset = [0.01, 0.1, 0.0, 0.0]  # Vertical offset before gates
 
 # Height offsets for exit points (meters)
-exit_height_offset = [0.1, 0.0, 0.05, 0.0]      # Vertical offset after gates
+exit_height_offset = [0.1, 0.0, 0.05, 0.0]     # Vertical offset after gates
 
 # Default values for gates beyond configured indices
-default_approach_dist = 0.2              # Default approach distance
-default_exit_dist = 0.3                  # Default exit distance
-default_approach_height_offset = 0.0     # Default approach height
+default_approach_dist = 0.1              # Default approach distance
+default_exit_dist = 0.5                  # Default exit distance
+default_approach_height_offset = 0.1     # Default approach height
 default_exit_height_offset = 0.0         # Default exit height
 ```
 
 ### Speed Configuration
 ```python
 # Speed profiles for different flight phases (m/s)
-base_speed = 1.6         # Normal cruising speed
-high_speed = 2.5         # Speed between gates
-approach_speed = 1.0     # Speed when approaching gates
-exit_speed = 2.0         # Speed when exiting gates
+base_speed = 1.8         # Normal cruising speed
+high_speed = 2.2         # Speed between gates
+approach_speed = 1.5     # Speed when approaching gates
+exit_speed = 2.2         # Speed when exiting gates
 ```
 
 ### Collision Avoidance Parameters
@@ -171,7 +171,7 @@ ellipsoid_radius = 0.12        # Gate ellipsoid radius (meters)
 ellipsoid_length = 0.7         # Gate ellipsoid length (meters)
 
 # Replanning threshold
-replanning_threshold = 0.05     # Minimum gate movement to trigger replanning (meters)
+replanning_threshold = 0.02     # Minimum gate movement to trigger replanning (meters)
 
 # Ignored obstacles (list of indices to skip)
 ignored_obstacle_indices = []   # Obstacles to ignore for collision avoidance
@@ -180,20 +180,20 @@ ignored_obstacle_indices = []   # Obstacles to ignore for collision avoidance
 ### Trajectory Planning Parameters
 ```python
 # Trajectory generation settings
-N_default = 30                  # Default number of trajectory points
-T_HORIZON_default = 1.5        # Default horizon time
+N_default = 60                  # Default number of trajectory points
+T_HORIZON_default = 2.0        # Default horizon time
 
 # Smoothing parameters
-momentum_time = 0.3            # Time to preserve momentum during replanning
-max_momentum_distance = 1.0    # Maximum momentum preservation distance
+momentum_time = 0.15            # Time to preserve momentum during replanning
+max_momentum_distance = 0.3    # Maximum momentum preservation distance
 velocity_threshold = 0.5       # Minimum velocity for momentum preservation
 transition_factor = 0.7        # Blending factor for smooth transitions
 
 # Generation parameters
 min_speed_threshold = 0.1      # Minimum allowable speed
-min_gate_duration = 1.0        # Minimum time per gate
-extra_points_final_gate = 50   # Extra trajectory points after final gate
-extra_points_normal = 200      # Extra trajectory points for intermediate gates
+min_gate_duration = 3.0        # Minimum time per gate
+extra_points_final_gate = 1   # Extra trajectory points after final gate
+extra_points_normal = 30      # Extra trajectory points for intermediate gates
 ```
 
 ## 🎯 Advanced Features
@@ -211,7 +211,7 @@ The MPC cost function weights adapt based on flight conditions:
 
 ```python
 # Weight adjustment phases
-weight_adjustment_duration = 2.4 * freq  # Duration of enhanced weights (seconds * frequency)
+weight_adjustment_duration = 0.7 * freq  # Duration of enhanced weights (seconds * frequency)
 
 # Gradual transition between weight sets during replanning
 def _update_weights(self):
@@ -228,7 +228,7 @@ def _update_weights(self):
 The trajectory planner implements racing line techniques:
 
 - **Gate Center Shifts**: Shifts gate crossing points forward for optimal racing lines
-- **Speed Profiles**: Different speeds for approach (1.0 m/s), gate passage (1.0 m/s), and exit phases (2.0 m/s)
+- **Speed Profiles**: Different speeds for approach (1.5 m/s), gate passage (1.5 m/s), and exit phases (2.2 m/s)
 - **Momentum Preservation**: Maintains forward momentum through turns using cubic spline velocity boundary conditions
 
 ## 📊 Control Pipeline
@@ -241,11 +241,3 @@ The trajectory planner implements racing line techniques:
 6. **MPC Optimization**: Solve for optimal control inputs over prediction horizon
 7. **Control Output**: Return attitude commands [thrust, roll, pitch, yaw]
 8. **Logging**: Record performance metrics and flight data
-
-## 📈 Performance Optimization
-
-### Key Performance Parameters
-- **Prediction Horizon (N=60)**: Balance between performance and computational cost
-- **Control Frequency (240 Hz)**: Higher frequency for better tracking, more computation
-- **Replanning Frequency (10 ticks)**: Balance between reactivity and stability
-- **Cost Weights**: Tune for desired tracking vs. control effort trade-off
