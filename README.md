@@ -17,7 +17,7 @@ The system combines several advanced control techniques:
 
 Follow the getting started guide: https://lsy-drone-racing.readthedocs.io/en/latest/getting_started/setup.html
 
-## Acados
+### Acados
 Summary of installation:
 ```bash
 # Clone the repo and check out the correct branch, initialize submodules.
@@ -52,6 +52,14 @@ micromamba activate ros_env
 # If he asks you whether you want to get the t_renderer package installed automatically, press yes.
 python3 ~/repos/acados/examples/acados_python/getting_started/minimal_example_ocp.py
 ```
+
+## 🚀 Running the Simulation
+Run the simulation using:
+```bash
+python scripts/sim.py
+```
+
+For any command line options, take a look at the [course website](https://lsy-drone-racing.readthedocs.io/en/latest/challenge/simulation.html).
 
 ## 🛠️ System Architecture
 
@@ -243,4 +251,4 @@ The trajectory planner implements racing line techniques:
 8. **Logging**: Record performance metrics and flight data
 
 ## Further Information
-For further information click [here](README_LSY.md).
+For further information check out the README file of the course ([README_LSY.md](README_LSY.md)).
