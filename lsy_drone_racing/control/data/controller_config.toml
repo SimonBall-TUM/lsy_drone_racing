@@ -49,7 +49,7 @@ T_HORIZON_default = 1.5         # Default horizon time for trajectory planning
 
 # Gate approach distances per gate (4 gates)
 approach_dist = [0.2, 0.3, 0.2, 0.1]
-exit_dist = [0.4, 0.15, 0.2, 5.0]
+exit_dist = [0.4, 0.15, 0.25, 5.0]
 
 # Default distances for fallback
 default_approach_dist = 0.1
