@@ -243,4 +243,4 @@ The trajectory planner implements racing line techniques:
 8. **Logging**: Record performance metrics and flight data
 
 ## Further Information
-For further information click [here](README_LSY_md).
+For further information click [here](README_LSY.md).
